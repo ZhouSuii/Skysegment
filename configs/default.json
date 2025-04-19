@@ -1,0 +1,54 @@
+{
+    "episodes": 10000,
+    "max_steps": 100,
+    "batch_size": 32,
+    "methods": [
+        "random",
+        "greedy",
+        "spectral",
+        "metis",
+        "dqn",
+        "gnn",
+        "ppo",
+        "gnn_ppo"
+    ],
+    "dqn_config": {
+        "memory_size": 2000,
+        "gamma": 0.95,
+        "epsilon": 1.0,
+        "epsilon_min": 0.01,
+        "epsilon_decay": 0.995,
+        "learning_rate": 0.001
+    },
+    "gnn_config": {
+        "memory_size": 2000,
+        "gamma": 0.95,
+        "epsilon": 1.0,
+        "epsilon_min": 0.01,
+        "epsilon_decay": 0.995,
+        "learning_rate": 0.001,
+        "hidden_dim": 128,
+        "target_update_freq": 10
+    },
+    "ppo_config": {
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "clip_ratio": 0.2,
+        "learning_rate": 0.0003,
+        "ppo_epochs": 10,
+        "batch_size": 32,
+        "entropy_coef": 0.01,
+        "value_coef": 0.5
+    },
+    "gnn_ppo_config": {
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "clip_ratio": 0.2,
+        "learning_rate": 0.0003,
+        "ppo_epochs": 10,
+        "batch_size": 32,
+        "entropy_coef": 0.01,
+        "value_coef": 0.5,
+        "hidden_dim": 128
+    }
+}
