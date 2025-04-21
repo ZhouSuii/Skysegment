@@ -8,6 +8,18 @@ import pandas as pd
 import json
 from tqdm import tqdm
 
+# 配置中文字体支持 - 添加此段代码
+try:
+    # 尝试使用文泉驿微米黑字体
+    plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'DejaVu Sans', 'sans-serif']
+    plt.rcParams['axes.unicode_minus'] = False  # 正确显示负号
+    
+    # 验证字体加载
+    mpl.font_manager._rebuild()
+    plt.rcParams['font.family'] = 'sans-serif'  # 使用无衬线字体
+except Exception as e:
+    print(f"字体配置错误: {e}，将使用默认字体")
+
 from environment import GraphPartitionEnvironment
 from agent_dqn_basic import DQNAgent
 from metrics import evaluate_partition
@@ -562,7 +574,7 @@ def plot_comparison(graph_name, results, results_dir):
     methods = list(results.keys())
     weight_variance = [results[m]["weight_variance"] for m in methods]
     edge_cut = [results[m]["normalized_cut"] for m in methods]
-    execution_time = [results[m]["execution_time"] for m in methods]
+    execution_time = [results[m]["runtime"] for m in methods]
 
     # 创建子图
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))

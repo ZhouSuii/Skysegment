@@ -51,6 +51,21 @@
     - 批处理机制：
         - GNN 的批处理需要处理不同大小的图和节点索引
         - Batch.from_data_list() 操作需要处理每个图的边索引的偏移量
+4. 训练过程中发现gpu利用率还是很低(5-10%)，但是cpu利用率非常高(105%)  
+说明计算瓶颈在cpu上而非gpu(4090)，可能原因如下：
+    - 数据预处理和环境交互 (CPU密集型):
+        - 环境模拟：GraphPartitionEnvironment 中的 step、reset 和 _calculate_reward 方法涉及图的操作（如检查边、计算权重、更新分配），这些都是在CPU上执行的，大型图会消耗大量cpu时间
+        - 状态转换：将环境状态 (partition_assignment, 节点权重/度) 转换为模型所需的输入格式（扁平化的Numpy数组或PyTorch Geometric的Data对象）是在CPU上完成的。特别是 _state_to_pyg_data 函数（在 agent_gnn.py 和 agent_ppo_gnn.py 中），它需要为每个状态构建节点特征矩阵并创建Data对象，这可能非常耗时。虽然 agent_ppo_gnn.py 中进行了一些优化（如预计算固定特征），但这仍然是一个主要的CPU任务。
+    - 数据传输瓶颈：
+        - 模型（如DQN, GNNDQN, PPOPolicy, GNNPPOPolicy）虽然在GPU上运行，但每次调用 act（推理）或 replay/update（训练）时，都需要将当前状态或一批经验数据从CPU内存传输到GPU内存。
+        - 对于GNN模型，需要传输Data对象或Batch对象。频繁的小批量数据传输会产生显著的开销，CPU忙于准备和传输数据，而GPU则处于等待状态。
+    - 模型计算量较小:
+        - 对于某些图的大小和复杂度，你使用的模型（即使是GNN）在GPU上的前向和后向传播可能非常快。强大的GPU（如RTX 4090）可以在极短的时间内完成计算
+        - 如果CPU准备下一批数据的时间远长于GPU处理当前批次的时间，GPU就会大部分时间处于空闲状态
+    - Agent 内部的 CPU 计算:
+    - Python GIL 和串行操作:
+
+性能分析与改进：
    
 
 
