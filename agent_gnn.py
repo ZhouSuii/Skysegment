@@ -4,9 +4,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from collections import deque
 import random
-from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.nn import GCNConv
 import networkx as nx
 from torch_geometric.data import Data, Batch
 
@@ -38,13 +37,6 @@ class GNNDQN(nn.Module):
         # 对每个节点，为每个可能的分区预测Q值
         q_values = self.q_net(x)
 
-        # 如果是批处理数据，则获取batch_size
-        # 否则默认为1（单个图）
-        if hasattr(data, 'num_graphs'):
-            batch_size = data.num_graphs
-        else:
-            batch_size = 1
-
         return q_values
 
 
@@ -68,15 +60,30 @@ class GNNDQNAgent:
         self.epsilon_decay = config.get('epsilon_decay', 0.995)
         self.learning_rate = config.get('learning_rate', 0.001)
         self.target_update_freq = config.get('target_update_freq', 10)
-        self.memory_size = config.get('memory_size', 2000)
+        self.memory_capacity = config.get('memory_capacity', 2000)
+        
+        # 检查GPU可用性
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"GNN-DQN使用设备: {self.device}")
+        
+        if self.device.type == 'cuda':
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
+            print(f"CUDA版本: {torch.version.cuda}")
 
-        # 初始化经验回放
-        self.memory = deque(maxlen=self.memory_size)
+        # 初始化经验回放缓冲区
+        self.memory_counter = 0
+        self.memory = {
+            'states': [],  # 存储PyG数据对象
+            'actions': np.zeros(self.memory_capacity, dtype=np.int64),
+            'rewards': np.zeros(self.memory_capacity, dtype=np.float32),
+            'next_states': [],  # 存储PyG数据对象
+            'dones': np.zeros(self.memory_capacity, dtype=np.float32)
+        }
 
-        # 初始化GNN模型
+        # 初始化GNN模型并移动到GPU
         hidden_dim = config.get('hidden_dim', 128)
-        self.model = GNNDQN(self.node_features, hidden_dim, num_partitions, num_partitions)
-        self.target_model = GNNDQN(self.node_features, hidden_dim, num_partitions, num_partitions)
+        self.model = GNNDQN(self.node_features, hidden_dim, num_partitions, num_partitions).to(self.device)
+        self.target_model = GNNDQN(self.node_features, hidden_dim, num_partitions, num_partitions).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         self.update_target_model()
 
@@ -94,24 +101,21 @@ class GNNDQNAgent:
             edge_index.append([u, v])
             edge_index.append([v, u])  # 添加反向边
 
-        self.edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        self.edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous().to(self.device)
 
         # 保存节点权重和度
         self.node_weights = np.array([self.graph.nodes[i]['weight']
-                                      for i in range(self.num_nodes)], dtype=float)
+                                      for i in range(self.num_nodes)], dtype=np.float32)
         max_weight = max(self.node_weights) if len(self.node_weights) > 0 else 1.0
         self.node_weights = self.node_weights / max_weight
 
         degrees = np.array([self.graph.degree[i]
-                            for i in range(self.num_nodes)], dtype=float)
+                            for i in range(self.num_nodes)], dtype=np.float32)
         max_degree = max(degrees) if len(degrees) > 0 else 1.0
         self.node_degrees = degrees / max_degree
 
     def _state_to_pyg_data(self, state):
         """将环境状态转换为PyG数据对象"""
-        # 状态形状: [num_nodes, num_partitions + 1]
-        # 最后一列是节点度
-
         # 创建节点特征: [分区one-hot, 归一化权重, 归一化度]
         x = np.zeros((self.num_nodes, self.node_features), dtype=np.float32)
 
@@ -127,9 +131,9 @@ class GNNDQNAgent:
         # 创建PyG数据对象
         x = torch.FloatTensor(x)
         data = Data(x=x, edge_index=self.edge_index)
-
-        # 为单个图模拟batch
-        data.batch = torch.zeros(self.num_nodes, dtype=torch.long)
+        
+        # 将数据移至GPU设备
+        data = data.to(self.device)
 
         return data
 
@@ -139,7 +143,27 @@ class GNNDQNAgent:
 
     def remember(self, state, action, reward, next_state, done):
         """存储经验到回放缓冲区"""
-        self.memory.append((state, action, reward, next_state, done))
+        index = self.memory_counter % self.memory_capacity
+        
+        # 转换为PyG数据对象并存储
+        state_data = self._state_to_pyg_data(state)
+        next_state_data = self._state_to_pyg_data(next_state)
+        
+        # 如果列表长度小于当前索引+1，则添加新元素
+        if len(self.memory['states']) <= index:
+            self.memory['states'].append(state_data)
+            self.memory['next_states'].append(next_state_data)
+        else:
+            # 否则替换已有元素
+            self.memory['states'][index] = state_data
+            self.memory['next_states'][index] = next_state_data
+            
+        # 存储其他数据
+        self.memory['actions'][index] = action
+        self.memory['rewards'][index] = reward
+        self.memory['dones'][index] = float(done)
+        
+        self.memory_counter += 1
 
     def act(self, state):
         """根据当前状态选择动作"""
@@ -157,46 +181,81 @@ class GNNDQNAgent:
         return torch.argmax(q_values).item()
 
     def replay(self, batch_size):
-        """从经验回放中学习"""
-        if len(self.memory) < batch_size:
-            return 0.0  # 返回默认loss值
+        """从经验回放中学习，使用真正的批处理"""
+        # 确保有足够的样本
+        memory_size = min(self.memory_counter, self.memory_capacity)
+        if memory_size < batch_size:
+            return 0.0
 
-        total_loss = 0.0
-        # 从记忆中随机采样
-        minibatch = random.sample(self.memory, batch_size)
+        # 随机采样批量索引
+        indices = np.random.choice(memory_size, batch_size, replace=False)
+        
+        # 从内存中获取批处理数据
+        batch_states = [self.memory['states'][i] for i in indices]
+        batch_next_states = [self.memory['next_states'][i] for i in indices]
+        
+        # 使用Batch类创建批处理图数据
+        batch_state_data = Batch.from_data_list(batch_states).to(self.device)
+        batch_next_state_data = Batch.from_data_list(batch_next_states).to(self.device)
+        
+        # 将其他数据转移到GPU
+        batch_actions = torch.tensor(self.memory['actions'][indices], dtype=torch.long).to(self.device)
+        batch_rewards = torch.tensor(self.memory['rewards'][indices], dtype=torch.float32).to(self.device)
+        batch_dones = torch.tensor(self.memory['dones'][indices], dtype=torch.float32).to(self.device)
 
-        for state, action, reward, next_state, done in minibatch:
-            # 将状态转换为PyG数据
-            state_data = self._state_to_pyg_data(state)
-            next_state_data = self._state_to_pyg_data(next_state)
-
-            # 计算目标 Q 值
-            if done:
-                target = reward
-            else:
-                with torch.no_grad():
-                    # 使用PyG数据对象而非张量
-                    next_q_values = self.target_model(next_state_data)
-                    target = reward + self.gamma * torch.max(next_q_values).item()
-
-            # 获取当前 Q 值预测
-            current_q = self.model(state_data)
-
-            # 找出选中的动作对应的Q值
-            # 将action展平为节点索引和分区索引
-            node_idx = action // self.num_partitions
-            partition_idx = action % self.num_partitions
-
-            # 获取选中节点和分区的Q值
-            current_q_value = current_q[node_idx, partition_idx]
-
-            # 执行优化步骤
-            self.optimizer.zero_grad()
-            loss = nn.MSELoss()(current_q_value, torch.tensor([target]))
-            loss.backward()
-            self.optimizer.step()
-
-            total_loss += loss.item()
+        # 获取当前Q值
+        current_q_values = self.model(batch_state_data)
+        
+        # 计算目标Q值
+        with torch.no_grad():
+            next_q_values = self.target_model(batch_next_state_data)
+            
+            # 对每个节点获取最大Q值，并根据批处理索引分组
+            next_max_q = torch.zeros(batch_size, dtype=torch.float32).to(self.device)
+            
+            # 从索引中获取每个节点的批处理id
+            batch_idx = batch_next_state_data.batch
+            
+            # 获取每个图中每个节点的最大Q值
+            for i in range(batch_size):
+                # 找到属于当前批次索引的节点
+                mask = (batch_idx == i)
+                # 获取这些节点的Q值并找出最大值
+                next_max_q[i] = next_q_values[mask].max()
+                
+            # 计算目标Q值
+            target_q = batch_rewards + (1 - batch_dones) * self.gamma * next_max_q
+        
+        # 准备当前Q值用于损失计算
+        batch_indices = []
+        node_indices = []
+        q_values = []
+        
+        # 计算actions对应的节点索引和分区
+        node_idx_list = batch_actions // self.num_partitions
+        partition_idx_list = batch_actions % self.num_partitions
+        
+        # 处理批量的每个示例
+        for batch_idx in range(batch_size):
+            # 获取当前示例中的节点索引
+            node_idx = node_idx_list[batch_idx]
+            partition_idx = partition_idx_list[batch_idx]
+            
+            # 找出该节点在批处理图中的索引
+            actual_node_idx = (batch_state_data.batch == batch_idx).nonzero(as_tuple=True)[0][node_idx]
+            
+            # 添加到集合中
+            q_values.append(current_q_values[actual_node_idx, partition_idx])
+        
+        # 将q_values转换为张量
+        q_values = torch.stack(q_values)
+        
+        # 计算损失并优化
+        loss = nn.MSELoss()(q_values, target_q)
+        
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
         # 探索率衰减
         if self.epsilon > self.epsilon_min:
@@ -207,7 +266,7 @@ class GNNDQNAgent:
         if self.train_count % self.target_update_freq == 0:
             self.update_target_model()
 
-        return total_loss / batch_size  # 返回平均损失
+        return loss.item()
 
     def save_model(self, filepath):
         """保存模型到文件"""
@@ -215,5 +274,5 @@ class GNNDQNAgent:
 
     def load_model(self, filepath):
         """从文件加载模型"""
-        self.model.load_state_dict(torch.load(filepath))
-        self.target_model.load_state_dict(torch.load(filepath))
+        self.model.load_state_dict(torch.load(filepath, map_location=self.device))
+        self.target_model.load_state_dict(torch.load(filepath, map_location=self.device))

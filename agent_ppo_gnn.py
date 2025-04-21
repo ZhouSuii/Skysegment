@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 from torch.distributions import Categorical
 from torch_geometric.nn import GCNConv, global_mean_pool
-from torch_geometric.data import Data
+from torch_geometric.data import Data, Batch
 
 
 # GNN-PPO策略网络
