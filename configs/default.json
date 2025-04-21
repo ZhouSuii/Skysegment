@@ -1,16 +1,16 @@
 {
-    "episodes": 10000,
+    "episodes": 2000,
     "max_steps": 100,
     "batch_size": 32,
     "methods": [
         "random",
         "greedy",
         "spectral",
-        "ppo",
+        "gnn_ppo",
         "metis",
         "dqn",
         "gnn",
-        "gnn_ppo"
+        "ppo"
     ],
     "dqn_config": {
         "memory_size": 2000,
