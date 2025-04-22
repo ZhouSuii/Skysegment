@@ -6,11 +6,11 @@
         "random",
         "greedy",
         "spectral",
-        "gnn_ppo",
         "metis",
         "dqn",
         "gnn",
-        "ppo"
+        "ppo",
+        "gnn_ppo"
     ],
     "dqn_config": {
         "memory_size": 2000,
