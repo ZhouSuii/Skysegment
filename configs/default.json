@@ -1,7 +1,7 @@
 {
-    "episodes": 2000,
+    "episodes": 10000,
     "max_steps": 100,
-    "batch_size": 32,
+    "batch_size": 512,
     "methods": [
         "random",
         "greedy",

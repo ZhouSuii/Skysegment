@@ -6,6 +6,7 @@ import numpy as np
 from torch.distributions import Categorical
 from torch_geometric.nn import GCNConv, global_mean_pool
 from torch_geometric.data import Data, Batch
+from torch_geometric.utils import subgraph
 import time  # 添加 time 模块用于性能分析
 
 
@@ -175,22 +176,26 @@ class GNNPPOAgent:
         self.fixed_features[:, 0] = self.node_weights
         self.fixed_features[:, 1] = self.node_degrees
 
-    # 【优化15】改进状态转换，减少CPU计算量
-    def _state_to_pyg_data(self, state):
+    # 【优化15】改进状态转换，减少CPU计算量和优化数据传输
+    def _state_to_pyg_data(self, state, batch_mode=False):
         """将环境状态转换为PyG数据对象, 优化性能"""
         start = time.time()
         
-        # 创建节点特征: [分区one-hot, 归一化权重, 归一化度]
-        x = np.zeros((self.num_nodes, self.node_features), dtype=np.float32)
-
-        # 填充分区one-hot部分
-        x[:, :self.num_partitions] = state[:, :self.num_partitions]
+        # 直接使用PyTorch操作替代NumPy
+        if isinstance(state, np.ndarray):
+            # 创建节点特征: [分区one-hot, 归一化权重, 归一化度]
+            x = np.zeros((self.num_nodes, self.node_features), dtype=np.float32)
+            # 填充分区one-hot部分
+            x[:, :self.num_partitions] = state[:, :self.num_partitions]
+            # 添加预计算的节点权重和度
+            x[:, self.num_partitions:] = self.fixed_features
+            # 转换为Tensor并移至GPU
+            x = torch.from_numpy(x).to(self.device)
+        else:
+            # 已经是Tensor的情况
+            x = state.to(self.device)
         
-        # 添加预计算的节点权重和度
-        x[:, self.num_partitions:] = self.fixed_features
-        
-        # 创建PyG数据对象并移至GPU
-        x = torch.FloatTensor(x).to(self.device)
+        # 创建PyG数据对象
         data = Data(x=x, edge_index=self.edge_index)
 
         self.conversion_time += time.time() - start
@@ -211,7 +216,7 @@ class GNNPPOAgent:
         # 【优化17】使用计时器评估性能瓶颈
         start = time.time()
         
-        # 将状态转换为PyG数据
+        # 将状态转换为PyG数据 - 这部分仍需要实时转换以做出决策
         state_data = self._state_to_pyg_data(state)
         
         conversion_end = time.time()
@@ -221,12 +226,11 @@ class GNNPPOAgent:
             action, log_prob = self.policy.act(state_data)
             _, values = self.policy(state_data)
             value = values.mean().item()  # 使用所有节点值的平均作为状态价值
-            
+                
         self.forward_time += time.time() - conversion_end
 
-        # 存储当前轨迹信息
-        self.states.append(state)
-        self.state_datas.append(state_data)
+        # 存储当前轨迹信息 - 注意我们现在存储原始状态，不预先转换
+        self.states.append(state)  # 存储原始NumPy状态
         self.actions.append(action)
         self.log_probs.append(log_prob)
         self.values.append(value)
@@ -242,7 +246,7 @@ class GNNPPOAgent:
         self.dones.append(done)
 
     def update(self):
-        """使用PPO算法更新策略"""
+        """使用PPO算法更新策略，优化批处理逻辑"""
         # 【优化19】根据更新频率决定是否执行更新
         if self.update_counter < self.update_frequency:
             return 0.0  # 没达到更新频率，跳过更新
@@ -258,6 +262,17 @@ class GNNPPOAgent:
         # 计算优势估计和回报
         returns, advantages = self._compute_returns_advantages_vectorized()  # 使用向量化版本
 
+        # 【优化】批量将状态转换为PyG数据对象
+        batch_start = time.time()
+        state_datas = []
+        for state in self.states:
+            data = self._state_to_pyg_data(state)
+            state_datas.append(data)
+            
+        # 一次性创建批量数据，而不是在循环中反复创建
+        all_states_data = Batch.from_data_list(state_datas)
+        self.conversion_time += time.time() - batch_start
+
         # 【优化20】一次性将数据转移到GPU，减少传输次数
         actions = torch.LongTensor(self.actions).to(self.device)
         old_log_probs = torch.stack([lp.to(self.device) for lp in self.log_probs])
@@ -268,12 +283,11 @@ class GNNPPOAgent:
         update_rounds = 0
 
         # 【优化21】创建索引用于随机抽样
-        dataset_size = len(self.state_datas)
+        dataset_size = len(self.states)
         indices = torch.randperm(dataset_size)
 
         # 进行多轮更新，减少轮数提高速度
         for _ in range(self.ppo_epochs):
-            # 【优化22】打乱索引提高随机性
             indices = indices[torch.randperm(len(indices))]
             
             # 按批次进行更新
@@ -281,12 +295,16 @@ class GNNPPOAgent:
                 end_idx = min(idx + self.batch_size, dataset_size)
                 batch_indices = indices[idx:end_idx]
                 
-                # 【优化23】高效批处理：只处理选定的索引
+                # 【优化】从预先构建的大批量中提取子批量
+                # 注意：PyG的Batch没有直接支持通过索引提取子批量的功能
+                # 所以我们需要重新构建这个小批量
+                # 最理想情况是使用all_states_data.index_select，但PyG不直接支持
                 batch_states_data = []
                 for i in batch_indices:
-                    batch_states_data.append(self.state_datas[i])
+                    batch_states_data.append(state_datas[i])
                 
                 batch_state_data = Batch.from_data_list(batch_states_data).to(self.device)
+                
                 batch_actions = actions[batch_indices]
                 batch_old_log_probs = old_log_probs[batch_indices]
                 batch_returns = returns[batch_indices]
@@ -295,21 +313,10 @@ class GNNPPOAgent:
                 # 获取当前策略的动作概率、价值估计和熵
                 new_log_probs, node_values, entropy = self.policy.evaluate(batch_state_data, batch_actions)
 
-                # === 添加这段代码以聚合节点值 ===
+                # 【优化】使用PyG的global_mean_pool聚合节点值，避免Python循环
                 # 聚合节点值到图级别，使其与回报维度匹配
-                values = []
-                batch_idx = batch_state_data.batch  # 获取节点所属的图索引
-                
-                # 为每个图计算一个聚合值
-                for i in range(len(batch_indices)):
-                    # 找出所有属于当前图的节点
-                    mask = (batch_idx == i)
-                    # 计算当前图所有节点值的平均
-                    graph_value = node_values[mask].mean()
-                    values.append(graph_value)
-                
-                # 转换为张量
-                values = torch.stack(values)
+                values = global_mean_pool(node_values, batch_state_data.batch)
+                values = values.squeeze(-1)
 
                 # 计算概率比率
                 ratio = torch.exp(new_log_probs - batch_old_log_probs)

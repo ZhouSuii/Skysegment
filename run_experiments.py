@@ -4,6 +4,7 @@ import time
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import pandas as pd
 import json
 from tqdm import tqdm
