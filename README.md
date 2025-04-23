@@ -65,7 +65,9 @@
     - Agent 内部的 CPU 计算:
     - Python GIL 和串行操作:
 
-性能分析与改进：
+5. skysegment与test对比：
+    - dqn_basic中episode=10000，sky只需要不到一分钟，但是epsd=500 test要五分钟
+    - 
    
 
 

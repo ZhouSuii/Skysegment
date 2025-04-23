@@ -16,20 +16,26 @@ class GNNPPOPolicy(nn.Module):
         super(GNNPPOPolicy, self).__init__()
         self.num_partitions = num_partitions
 
-        # 【优化1】减少GNN层数，降低计算复杂度
+        # 增加 GNN 层数和宽度，提高 GPU 利用率
         self.conv1 = GCNConv(node_features, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)  # 新增第三层
         
-        # 【优化2】使用更高效的Actor网络结构
+        # 扩大 Actor 网络宽度
         self.actor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim*2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim*2, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, output_dim),
             nn.Softmax(dim=-1)
         )
 
-        # 【优化3】使用更高效的Critic网络结构
+        # 扩大 Critic 网络宽度
         self.critic = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim*2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim*2, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
@@ -37,8 +43,10 @@ class GNNPPOPolicy(nn.Module):
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
 
-        # 【优化4】减少GNN层数
+        # 增加更多计算层
         x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        x = F.relu(self.conv3(x, edge_index))
 
         # 对每个节点输出动作概率和状态价值
         action_probs = self.actor(x)
@@ -115,6 +123,11 @@ class GNNPPOAgent:
         self.update_frequency = config.get('update_frequency', 4) 
         self.update_counter = 0
         
+        # 增加新的GPU优化配置
+        self.hidden_dim = config.get('hidden_dim', 256)  # 增加默认隐藏层维度
+        self.use_cuda_streams = config.get('use_cuda_streams', True)
+        self.jit_compile = config.get('jit_compile', False)  # 是否使用JIT编译
+    
         # 【优化9】添加设备检测
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"GNN-PPO使用设备: {self.device}")
@@ -176,31 +189,202 @@ class GNNPPOAgent:
         self.fixed_features[:, 0] = self.node_weights
         self.fixed_features[:, 1] = self.node_degrees
 
-    # 【优化15】改进状态转换，减少CPU计算量和优化数据传输
     def _state_to_pyg_data(self, state, batch_mode=False):
-        """将环境状态转换为PyG数据对象, 优化性能"""
-        start = time.time()
+        """将环境状态转换为PyG数据对象，优化CPU-GPU数据传输"""
+        # 使用临时缓冲区避免重复分配内存
+        if not hasattr(self, '_features_buffer'):
+            self._features_buffer = np.zeros((self.num_nodes, self.node_features), dtype=np.float32)
         
-        # 直接使用PyTorch操作替代NumPy
-        if isinstance(state, np.ndarray):
-            # 创建节点特征: [分区one-hot, 归一化权重, 归一化度]
-            x = np.zeros((self.num_nodes, self.node_features), dtype=np.float32)
-            # 填充分区one-hot部分
-            x[:, :self.num_partitions] = state[:, :self.num_partitions]
-            # 添加预计算的节点权重和度
-            x[:, self.num_partitions:] = self.fixed_features
-            # 转换为Tensor并移至GPU
-            x = torch.from_numpy(x).to(self.device)
-        else:
-            # 已经是Tensor的情况
-            x = state.to(self.device)
+        # 直接使用预先分配的缓冲区
+        x = self._features_buffer
         
-        # 创建PyG数据对象
-        data = Data(x=x, edge_index=self.edge_index)
+        # 一次性填充分区数据
+        x[:, :self.num_partitions] = state[:, :self.num_partitions]
+        # 直接使用预计算的固定特征
+        x[:, self.num_partitions:] = self.fixed_features
+        
+        # 一次性转换为Tensor并移至GPU
+        x_tensor = torch.from_numpy(x.copy()).to(self.device)
+        
+        # 创建 PyG 数据对象，使用预先计算的边索引
+        data = Data(x=x_tensor, edge_index=self.edge_index)
 
-        self.conversion_time += time.time() - start
         return data
     
+    def _states_to_batch_data_optimized(self, states_list):
+        """优化的批量状态处理，直接在GPU上构建批处理数据"""
+        batch_size = len(states_list)
+        
+        # 预分配整个批次的特征张量，直接在GPU上创建
+        batch_features = torch.zeros(
+            (batch_size * self.num_nodes, self.node_features),
+            dtype=torch.float32, 
+            device=self.device
+        )
+        
+        # 一次性处理所有状态
+        for i, state in enumerate(states_list):
+            start_idx = i * self.num_nodes
+            end_idx = (i + 1) * self.num_nodes
+            
+            # 分区数据直接复制到GPU
+            batch_features[start_idx:end_idx, :self.num_partitions] = torch.tensor(
+                state[:, :self.num_partitions], dtype=torch.float32, device=self.device
+            )
+            
+            # 固定特征也直接在GPU上填充
+            batch_features[start_idx:end_idx, self.num_partitions:] = torch.tensor(
+                self.fixed_features, dtype=torch.float32, device=self.device
+            )
+        
+        # 构建批处理图结构
+        # 创建重复的边索引
+        batch_edge_index = []
+        for i in range(batch_size):
+            offset = i * self.num_nodes
+            # 复制边索引并添加偏移
+            batch_edge = self.edge_index.clone()
+            batch_edge[0, :] += offset
+            batch_edge[1, :] += offset
+            batch_edge_index.append(batch_edge)
+        
+        # 合并所有边索引
+        batch_edge_index = torch.cat(batch_edge_index, dim=1)
+        
+        # 创建批次索引
+        batch_idx = torch.arange(batch_size, device=self.device).repeat_interleave(self.num_nodes)
+        
+        # 构建批处理数据对象
+        batch_data = Batch(
+            x=batch_features,
+            edge_index=batch_edge_index,
+            batch=batch_idx
+        )
+        
+        return batch_data
+    
+    def collect_experiences_parallel(self, envs, num_steps=10):
+        """并行从多个环境收集经验，减少CPU瓶颈"""
+        num_envs = len(envs)
+        
+        # 重置所有环境
+        states = [env.reset()[0] for env in envs]
+        all_data = {
+            'states': [], 'actions': [], 'log_probs': [],
+            'rewards': [], 'dones': [], 'values': []
+        }
+        
+        # 预先处理初始状态批次
+        batch_data = self._states_to_batch_data_optimized(states)
+        
+        for _ in range(num_steps):
+            # 批量处理动作选择
+            with torch.no_grad():
+                action_probs, values = self.policy.forward(batch_data)
+                action_probs_flat = action_probs.view(-1)
+                
+                # 为每个节点采样动作
+                dist = Categorical(action_probs_flat)
+                actions = dist.sample()
+                log_probs = dist.log_prob(actions)
+                
+                # 重塑为每个环境的动作
+                actions = actions.view(num_envs, -1)
+                log_probs = log_probs.view(num_envs, -1)
+            
+            # 在所有环境中执行步骤
+            next_states = []
+            rewards = np.zeros(num_envs)
+            dones = np.zeros(num_envs, dtype=bool)
+            
+            for i, (env, action) in enumerate(zip(envs, actions)):
+                # 执行环境步骤
+                next_state, reward, done, _, _ = env.step(action[0].item())
+                next_states.append(next_state)
+                rewards[i] = reward
+                dones[i] = done
+                
+                # 存储经验
+                all_data['states'].append(states[i])
+                all_data['actions'].append(action[0].item())
+                all_data['log_probs'].append(log_probs[i][0])
+                all_data['rewards'].append(reward)
+                all_data['dones'].append(done)
+                all_data['values'].append(values[i].mean().item())
+                
+                # 存储到智能体缓冲区
+                self.states.append(states[i])
+                self.actions.append(action[0].item())
+                self.log_probs.append(log_probs[i][0])
+                self.rewards.append(reward)
+                self.dones.append(done)
+                self.values.append(values[i].mean().item())
+                
+            # 更新状态
+            states = next_states
+            
+            # 如果所有环境都结束，则重置
+            if np.all(dones):
+                states = [env.reset()[0] for env in envs]
+            
+            # 处理新的状态批次
+            batch_data = self._states_to_batch_data_optimized(states)
+        
+        return all_data
+    
+    def process_states_async(self, states_batch):
+        """使用CUDA Streams异步处理状态数据"""
+        # 只有在使用CUDA时才使用Streams
+        if self.device.type != 'cuda':
+            # CPU版本，直接调用普通处理
+            return self._states_to_batch_data_optimized(states_batch)
+        
+        batch_size = len(states_batch)
+        result_data = []
+        
+        # 创建多个CUDA流
+        num_streams = min(4, batch_size)
+        streams = [torch.cuda.Stream() for _ in range(num_streams)]
+        
+        # 分配每个流要处理的状态索引
+        stream_assignments = [[] for _ in range(num_streams)]
+        for i in range(batch_size):
+            stream_assignments[i % num_streams].append(i)
+        
+        # 在每个流中并行处理状态
+        for stream_idx, stream in enumerate(streams):
+            with torch.cuda.stream(stream):
+                for i in stream_assignments[stream_idx]:
+                    state = states_batch[i]
+                    
+                    # 在GPU上创建特征张量
+                    x = torch.zeros((self.num_nodes, self.node_features), 
+                                dtype=torch.float32, device=self.device)
+                    
+                    # 将分区数据复制到GPU
+                    x[:, :self.num_partitions] = torch.tensor(
+                        state[:, :self.num_partitions], dtype=torch.float32, device=self.device
+                    )
+                    
+                    # 添加固定特征
+                    x[:, self.num_partitions:] = torch.tensor(
+                        self.fixed_features, dtype=torch.float32, device=self.device
+                    )
+                    
+                    # 创建数据对象
+                    data = Data(x=x, edge_index=self.edge_index)
+                    result_data.append((i, data))
+        
+        # 等待所有流完成
+        torch.cuda.synchronize()
+        
+        # 按原始顺序排序结果
+        result_data.sort(key=lambda x: x[0])
+        sorted_data = [d for _, d in result_data]
+        
+        # 创建批处理数据
+        return Batch.from_data_list(sorted_data)
+
     # 【优化16】批量处理状态
     def _states_to_batch_data(self, states_list):
         """批量将多个状态转换为一个批处理数据对象"""
@@ -245,83 +429,90 @@ class GNNPPOAgent:
         self.rewards.append(reward)
         self.dones.append(done)
 
+    @torch.jit.script_if_tracing
+    def _forward_jit(self, x, edge_index):
+        """JIT加速的前向计算"""
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        x = F.relu(self.conv3(x, edge_index))
+        return x
+
     def update(self):
-        """使用PPO算法更新策略，优化批处理逻辑"""
-        # 【优化19】根据更新频率决定是否执行更新
+        """优化的PPO算法更新，提高GPU利用率"""
+        # 检查是否需要更新
         if self.update_counter < self.update_frequency:
-            return 0.0  # 没达到更新频率，跳过更新
+            return 0.0
 
-        self.update_counter = 0  # 重置计数器
-
+        self.update_counter = 0
         start = time.time()
         
-        # 确保有足够的数据进行更新
+        # 确保有足够的数据
         if len(self.rewards) == 0:
             return 0.0
 
-        # 计算优势估计和回报
-        returns, advantages = self._compute_returns_advantages_vectorized()  # 使用向量化版本
+        # 计算回报和优势
+        returns, advantages = self._compute_returns_advantages_vectorized()
 
-        # 【优化】批量将状态转换为PyG数据对象
-        batch_start = time.time()
-        state_datas = []
-        for state in self.states:
-            data = self._state_to_pyg_data(state)
-            state_datas.append(data)
-            
-        # 一次性创建批量数据，而不是在循环中反复创建
-        all_states_data = Batch.from_data_list(state_datas)
-        self.conversion_time += time.time() - batch_start
+        # 使用异步处理批量转换状态
+        state_processing_start = time.time()
+        state_datas = self.process_states_async(self.states)
+        self.conversion_time += time.time() - state_processing_start
 
-        # 【优化20】一次性将数据转移到GPU，减少传输次数
+        # 一次性将所有数据传输到GPU
         actions = torch.LongTensor(self.actions).to(self.device)
         old_log_probs = torch.stack([lp.to(self.device) for lp in self.log_probs])
         returns = torch.FloatTensor(returns).to(self.device)
         advantages = torch.FloatTensor(advantages).to(self.device)
 
+        # 使用更大的批次进行更新
         total_loss = 0.0
         update_rounds = 0
-
-        # 【优化21】创建索引用于随机抽样
         dataset_size = len(self.states)
-        indices = torch.randperm(dataset_size)
+        
+        # 增加批处理大小以提高 GPU 利用率
+        effective_batch_size = min(self.batch_size * 2, dataset_size)
 
-        # 进行多轮更新，减少轮数提高速度
+        # 使用 torch.randperm 在 GPU 上生成随机索引
+        if self.device.type == 'cuda':
+            indices = torch.randperm(dataset_size, device=self.device)
+        else:
+            indices = torch.randperm(dataset_size)
+
+        # 多轮更新
         for _ in range(self.ppo_epochs):
-            indices = indices[torch.randperm(len(indices))]
+            # 每轮重新打乱数据
+            if self.device.type == 'cuda':
+                indices = indices[torch.randperm(len(indices), device=self.device)]
+            else:
+                indices = indices[torch.randperm(len(indices))]
             
-            # 按批次进行更新
-            for idx in range(0, dataset_size, self.batch_size):
-                end_idx = min(idx + self.batch_size, dataset_size)
+            # 批次处理
+            for idx in range(0, dataset_size, effective_batch_size):
+                end_idx = min(idx + effective_batch_size, dataset_size)
                 batch_indices = indices[idx:end_idx]
                 
-                # 【优化】从预先构建的大批量中提取子批量
-                # 注意：PyG的Batch没有直接支持通过索引提取子批量的功能
-                # 所以我们需要重新构建这个小批量
-                # 最理想情况是使用all_states_data.index_select，但PyG不直接支持
+                # 从大批量中提取子批量
                 batch_states_data = []
-                for i in batch_indices:
+                cpu_indices = batch_indices.cpu().numpy()
+                for i in cpu_indices:
                     batch_states_data.append(state_datas[i])
                 
+                # 创建批处理数据
                 batch_state_data = Batch.from_data_list(batch_states_data).to(self.device)
-                
                 batch_actions = actions[batch_indices]
                 batch_old_log_probs = old_log_probs[batch_indices]
                 batch_returns = returns[batch_indices]
                 batch_advantages = advantages[batch_indices]
 
-                # 获取当前策略的动作概率、价值估计和熵
+                # 评估动作
                 new_log_probs, node_values, entropy = self.policy.evaluate(batch_state_data, batch_actions)
-
-                # 【优化】使用PyG的global_mean_pool聚合节点值，避免Python循环
-                # 聚合节点值到图级别，使其与回报维度匹配
+                
+                # 聚合节点值
                 values = global_mean_pool(node_values, batch_state_data.batch)
                 values = values.squeeze(-1)
 
-                # 计算概率比率
+                # 计算策略目标
                 ratio = torch.exp(new_log_probs - batch_old_log_probs)
-
-                # 计算PPO裁剪目标函数
                 surr1 = ratio * batch_advantages
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * batch_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
@@ -329,25 +520,23 @@ class GNNPPOAgent:
                 # 计算价值损失
                 value_loss = F.mse_loss(values, batch_returns)
 
-                # 计算总损失
+                # 总损失
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy.mean()
-                total_loss += loss.item()
-
-                # 执行优化
+                
+                # 优化
                 self.optimizer.zero_grad()
                 loss.backward()
-                
-                # 【优化24】添加梯度裁剪，提高训练稳定性
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-                
                 self.optimizer.step()
+                
+                total_loss += loss.item()
                 update_rounds += 1
 
         # 清空缓冲区
         self._clear_buffers()
         
         self.update_time += time.time() - start
-
+        
         # 返回平均损失
         return total_loss / max(1, update_rounds)
     

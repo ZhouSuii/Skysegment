@@ -7,16 +7,27 @@ import random
 
 # DQN网络模型
 class DQN(nn.Module):
-    def __init__(self, input_dim, output_dim):
+    def __init__(self, input_dim, output_dim, hidden_sizes=[256, 256]):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.fc3 = nn.Linear(128, output_dim)
-
+        
+        # 创建动态网络架构
+        layers = []
+        prev_size = input_dim
+        
+        for hidden_size in hidden_sizes:
+            layers.append(nn.Linear(prev_size, hidden_size))
+            layers.append(nn.ReLU())
+            # 添加BatchNorm来改善训练稳定性
+            layers.append(nn.BatchNorm1d(hidden_size))
+            prev_size = hidden_size
+        
+        # 添加输出层
+        layers.append(nn.Linear(prev_size, output_dim))
+        
+        self.model = nn.Sequential(*layers)
+    
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+        return self.model(x)
 
 
 # DQN智能体
@@ -35,6 +46,9 @@ class DQNAgent:
         self.learning_rate = config.get('learning_rate', 0.001)
         self.target_update_freq = config.get('target_update_freq', 10)
         self.memory_capacity = config.get('memory_capacity', 2000)
+        self.hidden_sizes = config.get('hidden_sizes', [256, 256])
+        self.batch_size = config.get('batch_size', 512)
+        self.jit_compile = config.get('jit_compile', True)
         
         # 检查是否有可用的GPU
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -43,6 +57,7 @@ class DQNAgent:
         if self.device.type == 'cuda':
             print(f"GPU: {torch.cuda.get_device_name(0)}")
             print(f"CUDA版本: {torch.version.cuda}")
+            torch.backends.cudnn.benchmark = True
             
         # 初始化经验回放缓冲区（使用更高效的数组存储）
         self.memory_counter = 0
@@ -55,13 +70,28 @@ class DQNAgent:
         }
 
         # 初始化模型并移动到GPU
-        self.model = DQN(state_size, action_size).to(self.device)
-        self.target_model = DQN(state_size, action_size).to(self.device)
+        self.model = DQN(state_size, action_size, self.hidden_sizes).to(self.device)
+        self.target_model = DQN(state_size, action_size, self.hidden_sizes).to(self.device)
+        
+        # 使用JIT编译提高GPU性能
+        if self.jit_compile and torch.__version__ >= '1.8.0':
+            self.model = torch.jit.script(self.model)
+            self.target_model = torch.jit.script(self.target_model)
+        
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         self.update_target_model()
 
         # 训练计数器
         self.train_count = 0
+
+        # 预先创建CUDA张量以减少内存分配
+        self.cuda_batches = {
+            'state': torch.zeros((self.batch_size, self.state_size), device=self.device, dtype=torch.float32),
+            'action': torch.zeros((self.batch_size), device=self.device, dtype=torch.int64),
+            'reward': torch.zeros((self.batch_size), device=self.device, dtype=torch.float32),
+            'next_state': torch.zeros((self.batch_size, self.state_size), device=self.device, dtype=torch.float32),
+            'done': torch.zeros((self.batch_size), device=self.device, dtype=torch.float32),
+        }
 
     def update_target_model(self):
         """更新目标网络的参数"""
@@ -84,20 +114,35 @@ class DQNAgent:
         
         self.memory_counter += 1
 
-    def act(self, state):
-        """根据当前状态选择动作"""
+    def act(self, state, action_mask=None):
+        """根据当前状态选择动作，支持动作掩码"""
         # 探索：随机选择动作
         if np.random.rand() <= self.epsilon:
+            if action_mask is not None:
+                # 从有效动作中随机选择
+                valid_actions = np.where(action_mask == 1)[0]
+                if len(valid_actions) > 0:
+                    return np.random.choice(valid_actions)
             return random.randrange(self.action_size)
 
         # 利用：使用模型预测最佳动作
         state_tensor = torch.FloatTensor(np.array(state).flatten()).to(self.device)
         with torch.no_grad():
             act_values = self.model(state_tensor)
+            
+            # 如果有动作掩码，将无效动作设为极小值
+            if action_mask is not None:
+                mask_tensor = torch.FloatTensor(action_mask).to(self.device)
+                invalid_mask = 1.0 - mask_tensor
+                act_values = act_values - invalid_mask * 1e9
+                
         return torch.argmax(act_values).item()
 
-    def replay(self, batch_size):
-        """从经验回放中学习，使用真正的批处理"""
+    def replay(self, batch_size=None):
+        """从经验回放中学习，使用优化的批处理"""
+        if batch_size is None:
+            batch_size = self.batch_size
+            
         # 确保有足够的样本
         memory_size = min(self.memory_counter, self.memory_capacity)
         if memory_size < batch_size:
@@ -106,22 +151,22 @@ class DQNAgent:
         # 随机采样批量索引
         indices = np.random.choice(memory_size, batch_size, replace=False)
         
-        # 获取批量数据并直接移至GPU
-        batch_states = torch.FloatTensor(self.memory['state'][indices]).to(self.device)
-        batch_actions = torch.LongTensor(self.memory['action'][indices]).to(self.device)
-        batch_rewards = torch.FloatTensor(self.memory['reward'][indices]).to(self.device)
-        batch_next_states = torch.FloatTensor(self.memory['next_state'][indices]).to(self.device)
-        batch_dones = torch.FloatTensor(self.memory['done'][indices]).to(self.device)
-
+        # 使用预先分配的CUDA张量
+        self.cuda_batches['state'].copy_(torch.FloatTensor(self.memory['state'][indices]))
+        self.cuda_batches['action'].copy_(torch.LongTensor(self.memory['action'][indices]))
+        self.cuda_batches['reward'].copy_(torch.FloatTensor(self.memory['reward'][indices]))
+        self.cuda_batches['next_state'].copy_(torch.FloatTensor(self.memory['next_state'][indices]))
+        self.cuda_batches['done'].copy_(torch.FloatTensor(self.memory['done'][indices]))
+        
         # 批量计算当前Q值
-        current_q_values = self.model(batch_states)
-        current_q_values_selected = current_q_values.gather(1, batch_actions.unsqueeze(1)).squeeze(1)
+        current_q_values = self.model(self.cuda_batches['state'])
+        current_q_values_selected = current_q_values.gather(1, self.cuda_batches['action'].unsqueeze(1)).squeeze(1)
         
         # 批量计算目标Q值
         with torch.no_grad():
-            next_q_values = self.target_model(batch_next_states)
+            next_q_values = self.target_model(self.cuda_batches['next_state'])
             max_next_q_values = next_q_values.max(1)[0]
-            expected_q_values = batch_rewards + (1 - batch_dones) * self.gamma * max_next_q_values
+            expected_q_values = self.cuda_batches['reward'] + (1 - self.cuda_batches['done']) * self.gamma * max_next_q_values
         
         # 计算损失并优化
         loss = nn.MSELoss()(current_q_values_selected, expected_q_values)

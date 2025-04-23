@@ -1,5 +1,5 @@
 {
-    "episodes": 10000,
+    "episodes": 500,
     "max_steps": 100,
     "batch_size": 512,
     "methods": [
@@ -18,7 +18,11 @@
         "epsilon": 1.0,
         "epsilon_min": 0.01,
         "epsilon_decay": 0.995,
-        "learning_rate": 0.001
+        "learning_rate": 0.001,
+        "hidden_sizes": [256, 256],
+        "target_update_freq": 10,
+        "jit_compile": true,
+        "batch_size": 512
     },
     "gnn_config": {
         "memory_size": 2000,
@@ -28,7 +32,11 @@
         "epsilon_decay": 0.995,
         "learning_rate": 0.001,
         "hidden_dim": 128,
-        "target_update_freq": 10
+        "target_update_freq": 50,
+        "num_layers": 2,       
+        "dropout_rate": 0.1,   
+        "jit_compile": false,   
+        "batch_size": 512      
     },
     "ppo_config": {
         "gamma": 0.99,
@@ -49,6 +57,8 @@
         "batch_size": 32,
         "entropy_coef": 0.01,
         "value_coef": 0.5,
-        "hidden_dim": 128
+        "hidden_dim": 256,
+        "jit_compile": true,
+        "use_cuda_streams": true
     }
 }
