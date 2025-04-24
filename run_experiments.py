@@ -318,7 +318,6 @@ def train_ppo_agent(graph, num_partitions, config):
         progress_bar.set_postfix({
             'reward': total_reward,
             'best': best_reward,
-            'epsilon': agent.epsilon,
             'loss': loss_history[-1] if loss_history else 0,
             'variance': variance_history[-1] if variance_history else 0
         })
@@ -385,7 +384,6 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
         progress_bar.set_postfix({
             'reward': total_reward,
             'best': best_reward,
-            'epsilon': agent.epsilon,
             'loss': loss_history[-1] if loss_history else 0,
             'variance': variance_history[-1] if variance_history else 0
         })
