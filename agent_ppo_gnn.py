@@ -222,52 +222,49 @@ class GNNPPOAgent:
         return data
     
     def _states_to_batch_data_optimized(self, states_list):
-        """优化的批量状态处理，直接在GPU上构建批处理数据"""
+        """优化的批量状态处理，减少GPU张量创建"""
         batch_size = len(states_list)
         
-        # 预分配整个批次的特征张量，直接在GPU上创建
-        batch_features = torch.zeros(
-            (batch_size * self.num_nodes, self.node_features),
-            dtype=torch.float32, 
-            device=self.device
-        )
+        # 在CPU上预处理所有特征，然后一次性传输到GPU
+        # 预分配NumPy数组
+        all_features = np.zeros((batch_size * self.num_nodes, self.node_features), dtype=np.float32)
         
-        # 一次性处理所有状态
+        # 一次性填充所有特征
         for i, state in enumerate(states_list):
             start_idx = i * self.num_nodes
             end_idx = (i + 1) * self.num_nodes
             
-            # 分区数据直接复制到GPU
-            batch_features[start_idx:end_idx, :self.num_partitions] = torch.tensor(
-                state[:, :self.num_partitions], dtype=torch.float32, device=self.device
-            )
+            # 分区数据
+            all_features[start_idx:end_idx, :self.num_partitions] = state[:, :self.num_partitions]
+            # 固定特征
+            all_features[start_idx:end_idx, self.num_partitions:] = self.fixed_features
+        
+        # 一次性传输到GPU，使用pin_memory和non_blocking=True
+        batch_features = torch.from_numpy(all_features).pin_memory().to(self.device, non_blocking=True)
+        
+        # 高效构建批处理边索引 - 使用缓存机制避免重复计算
+        if not hasattr(self, '_cached_batch_edge_indices') or self._cached_batch_edge_indices is None or \
+        self._cached_batch_size != batch_size:
             
-            # 固定特征也直接在GPU上填充
-            batch_features[start_idx:end_idx, self.num_partitions:] = torch.tensor(
-                self.fixed_features, dtype=torch.float32, device=self.device
-            )
+            # 计算批处理边索引 - 只在批量大小变化时重新计算
+            self._cached_batch_edge_indices = []
+            for i in range(batch_size):
+                offset = i * self.num_nodes
+                batch_edge = self.edge_index.clone()
+                batch_edge[0, :] += offset
+                batch_edge[1, :] += offset
+                self._cached_batch_edge_indices.append(batch_edge)
+            
+            self._cached_batch_edge_indices = torch.cat(self._cached_batch_edge_indices, dim=1)
+            self._cached_batch_size = batch_size
         
-        # 构建批处理图结构
-        # 创建重复的边索引
-        batch_edge_index = []
-        for i in range(batch_size):
-            offset = i * self.num_nodes
-            # 复制边索引并添加偏移
-            batch_edge = self.edge_index.clone()
-            batch_edge[0, :] += offset
-            batch_edge[1, :] += offset
-            batch_edge_index.append(batch_edge)
-        
-        # 合并所有边索引
-        batch_edge_index = torch.cat(batch_edge_index, dim=1)
-        
-        # 创建批次索引
+        # 创建批次索引 - 直接在GPU上生成
         batch_idx = torch.arange(batch_size, device=self.device).repeat_interleave(self.num_nodes)
         
         # 构建批处理数据对象
         batch_data = Batch(
             x=batch_features,
-            edge_index=batch_edge_index,
+            edge_index=self._cached_batch_edge_indices,
             batch=batch_idx
         )
         
@@ -448,7 +445,7 @@ class GNNPPOAgent:
         return x
 
     def update(self):
-        """优化的PPO算法更新，提高GPU利用率"""
+        """优化的PPO算法更新，减少CPU-GPU数据传输，保持计算在GPU上"""
         # 检查是否需要更新
         if self.update_counter < self.update_frequency:
             return 0.0
@@ -471,54 +468,84 @@ class GNNPPOAgent:
         # 一次性将所有数据传输到GPU
         actions = torch.LongTensor(self.actions).to(self.device)
         old_log_probs = torch.stack([lp.to(self.device) for lp in self.log_probs])
-        returns = torch.FloatTensor(returns).to(self.device)
-        advantages = torch.FloatTensor(advantages).to(self.device)
+        returns = torch.FloatTensor(returns).to(self.device, non_blocking=True)
+        advantages = torch.FloatTensor(advantages).to(self.device, non_blocking=True)
 
         # 使用更大的批次进行更新
         total_loss = 0.0
         update_rounds = 0
         dataset_size = len(self.states)
         
-        # 增加批处理大小以提高 GPU 利用率
+        # 增加批处理大小以提高GPU利用率
         effective_batch_size = min(self.batch_size * 2, dataset_size)
 
-        # 使用 torch.randperm 在 GPU 上生成随机索引
-        if self.device.type == 'cuda':
-            indices = torch.randperm(dataset_size, device=self.device)
-        else:
-            indices = torch.randperm(dataset_size)
+        # 在GPU上生成随机索引
+        indices = torch.randperm(dataset_size, device=self.device)
 
         # 多轮更新
         for _ in range(self.ppo_epochs):
             # 每轮重新打乱数据
-            if self.device.type == 'cuda':
-                indices = indices[torch.randperm(len(indices), device=self.device)]
-            else:
-                indices = indices[torch.randperm(len(indices))]
+            indices = indices[torch.randperm(len(indices), device=self.device)]
             
             # 批次处理
             for idx in range(0, dataset_size, effective_batch_size):
                 end_idx = min(idx + effective_batch_size, dataset_size)
                 batch_indices = indices[idx:end_idx]
                 
-                # 从大批量中提取子批量
-                batch_states_data = []
-                cpu_indices = batch_indices.cpu().numpy()
-                for i in cpu_indices:
-                    batch_states_data.append(state_datas[i])
+                # ========= 关键优化: 直接在GPU上进行批次提取 =========
+                # 不再使用CPU提取和Batch.from_data_list重构
+                # 而是直接操作PyG的内部张量以构建子批次
                 
-                # 创建批处理数据
-                batch_state_data = Batch.from_data_list(batch_states_data).to(self.device)
+                # 提取子批次的节点特征
+                batch_x_indices = []
+                for i in batch_indices:
+                    # 为每个样本生成节点索引
+                    start_node = i * self.num_nodes
+                    end_node = (i + 1) * self.num_nodes
+                    batch_x_indices.append(torch.arange(start_node, end_node, device=self.device))
+                
+                # 合并所有索引
+                batch_x_indices = torch.cat(batch_x_indices)
+                
+                # 从原始批处理数据中提取节点特征
+                batch_x = state_datas.x[batch_x_indices]
+                
+                # 构建子批次的batch索引
+                batch_size = len(batch_indices)
+                sub_batch = torch.arange(batch_size, device=self.device).repeat_interleave(self.num_nodes)
+                
+                # 构建子批次的边索引 - 使用mask操作而非重构
+                # 首先确定哪些节点在当前批次中
+                node_mask = torch.zeros(state_datas.num_nodes, dtype=torch.bool, device=self.device)
+                node_mask[batch_x_indices] = True
+                
+                # 然后确定哪些边的两个端点都在当前批次中
+                edge_mask = node_mask[state_datas.edge_index[0]] & node_mask[state_datas.edge_index[1]]
+                batch_edge_index = state_datas.edge_index[:, edge_mask]
+                
+                # 重映射节点索引到新的连续索引
+                node_idx_map = torch.full((state_datas.num_nodes,), -1, dtype=torch.long, device=self.device)
+                node_idx_map[batch_x_indices] = torch.arange(len(batch_x_indices), device=self.device)
+                batch_edge_index = node_idx_map[batch_edge_index]
+                
+                # 创建子批次数据对象
+                sub_batch_data = Data(
+                    x=batch_x,
+                    edge_index=batch_edge_index,
+                    batch=sub_batch
+                )
+                
+                # 相应的动作和优势也需要提取
                 batch_actions = actions[batch_indices]
                 batch_old_log_probs = old_log_probs[batch_indices]
                 batch_returns = returns[batch_indices]
                 batch_advantages = advantages[batch_indices]
 
-                # 评估动作
-                new_log_probs, node_values, entropy = self.policy.evaluate(batch_state_data, batch_actions)
+                # 评估动作 - 这里policy.evaluate需要能处理批处理数据
+                new_log_probs, node_values, entropy = self.policy.evaluate(sub_batch_data, batch_actions)
                 
-                # 聚合节点值
-                values = global_mean_pool(node_values, batch_state_data.batch)
+                # 聚合节点值 - 使用PyG的global_mean_pool
+                values = global_mean_pool(node_values, sub_batch_data.batch)
                 values = values.squeeze(-1)
 
                 # 计算策略目标
@@ -542,7 +569,7 @@ class GNNPPOAgent:
                 total_loss += loss.item()
                 update_rounds += 1
 
-                # 在损失计算后记录
+                # TensorBoard记录
                 if self.logger is not None and len(self.rewards) > 0:
                     self.logger.log_episode(
                         self.rewards,
@@ -552,11 +579,6 @@ class GNNPPOAgent:
                         policy_loss.item()
                     )
 
-                    # 记录节点嵌入的直方图 (GNN特有)
-                    if hasattr(self.policy,
-                               'node_embeddings') and self.logger.episode_count % self.logger.histogram_freq == 0:
-                        embeddings = self.policy.node_embeddings
-                        self.logger.log_histogram("gnn/node_embeddings", embeddings, self.logger.episode_count)
         # 清空缓冲区
         self._clear_buffers()
         
@@ -568,7 +590,7 @@ class GNNPPOAgent:
     
     # 【优化25】添加向量化的GAE计算
     def _compute_returns_advantages_vectorized(self):
-        """使用向量化计算GAE提高性能"""
+        """真正向量化的GAE计算, 无Python循环"""
         rewards = np.array(self.rewards)
         dones = np.array(self.dones)
         values = np.array(self.values)
@@ -585,21 +607,27 @@ class GNNPPOAgent:
         # 添加下一个状态值到values序列末尾
         values = np.append(values, next_value)
         
-        # 预分配优势数组
-        advantages = np.zeros_like(rewards)
+        # ========= 向量化GAE计算 =========
+        # 创建时间步长矩阵：用于计算每个时间步的折扣因子
+        steps = np.arange(len(rewards))[:, np.newaxis] - np.arange(len(rewards))[np.newaxis, :]
+        # 仅保留过去的时间步(steps >= 0)
+        mask = (steps >= 0).astype(np.float32)
         
-        # 使用循环计算GAE (后续可以进一步向量化)
-        gae = 0
-        for t in reversed(range(len(rewards))):
-            delta = rewards[t] + self.gamma * values[t + 1] * (1 - dones[t]) - values[t]
-            gae = delta + self.gamma * self.gae_lambda * (1 - dones[t]) * gae
-            advantages[t] = gae
-            
-        # 计算回报
+        # 计算GAE中的delta项: δt = rt + γVt+1(1-dt) - Vt
+        deltas = rewards + self.gamma * values[1:] * (1 - dones) - values[:-1]  # [T]
+        
+        # 计算折扣因子: (γλ)^l，其中l是时间步差
+        discount_factors = (self.gamma * self.gae_lambda) ** steps * mask
+        
+        # 矩阵乘法计算GAE: Σ(γλ)^l * δt+l
+        advantages = discount_factors.dot(deltas)
+        
+        # 计算回报 = 优势 + 值
         returns = advantages + values[:-1]
         
         # 标准化优势
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if len(advantages) > 1:  # 避免单样本标准化
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
         return returns, advantages
 

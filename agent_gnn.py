@@ -228,7 +228,7 @@ class GNNDQNAgent:
         return action
     
     def replay(self):
-        """从经验回放中学习"""
+        """从经验回放中学习 - 高度优化的向量化批处理版本"""
         if self.current_memory_size < self.batch_size:
             return 0.0
         
@@ -238,43 +238,61 @@ class GNNDQNAgent:
         # 获取批量数据
         batch_partition = self.memory['partition_assignments'][indices]
         batch_next_partition = self.memory['next_partition_assignments'][indices]
-        batch_actions = torch.tensor(self.memory['actions'][indices], dtype=torch.long).to(self.device)
-        batch_rewards = torch.tensor(self.memory['rewards'][indices], dtype=torch.float32).to(self.device)
-        batch_dones = torch.tensor(self.memory['dones'][indices], dtype=torch.float32).to(self.device)
+        batch_actions = torch.tensor(self.memory['actions'][indices], dtype=torch.long).pin_memory().to(self.device, non_blocking=True)
+        batch_rewards = torch.tensor(self.memory['rewards'][indices], dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
+        batch_dones = torch.tensor(self.memory['dones'][indices], dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
         
-       # 创建批量输入
-        batch_xs = []
-        batch_next_xs = []
-        batch_indices = []
+        # ========= 优化: 向量化特征提取 =========
+        # 预分配批处理特征张量
+        batch_x = torch.zeros((self.batch_size * self.num_nodes, self.node_features), 
+                            dtype=torch.float32, device=self.device)
+        batch_next_x = torch.zeros((self.batch_size * self.num_nodes, self.node_features), 
+                                dtype=torch.float32, device=self.device)
+        
+        # 向量化构建分区one-hot编码
         for i in range(self.batch_size):
-            # 获取节点特征
-            x_tensor = self._state_to_pyg_data(batch_partition[i])
-            next_x_tensor = self._state_to_pyg_data(batch_next_partition[i])
+            start_idx = i * self.num_nodes
+            end_idx = (i + 1) * self.num_nodes
             
-            batch_xs.append(x_tensor)
-            batch_next_xs.append(next_x_tensor)
+            # 设置当前状态的分区one-hot编码
+            current_partition = batch_partition[i]
+            batch_x[start_idx:end_idx, :self.num_partitions] = 0  # 清零
+            batch_x[start_idx:end_idx, current_partition] = 1  # 一次性设置整批的one-hot编码
             
-            # 为批次索引添加样本ID
-            batch_indices.extend([i] * self.num_nodes)
-
-        # 连接为大批次
-        batch_x = torch.cat(batch_xs, dim=0)
-        batch_next_x = torch.cat(batch_next_xs, dim=0)
-        batch_indices = torch.tensor(batch_indices, dtype=torch.long, device=self.device)
-
-        # 创建扩展的边索引
-        edge_indices = []
-        for i in range(self.batch_size):
-            # 为每个样本创建边索引
-            offset = i * self.num_nodes
-            # 克隆边索引并添加偏移
-            batch_edge_index = self.edge_index.clone()
-            batch_edge_index = batch_edge_index + offset
-            edge_indices.append(batch_edge_index)
-
-        # 连接所有边索引
-        batch_edge_index = torch.cat(edge_indices, dim=1)
-
+            # 设置下一状态的分区one-hot编码
+            next_partition = batch_next_partition[i]
+            batch_next_x[start_idx:end_idx, :self.num_partitions] = 0  # 清零
+            batch_next_x[start_idx:end_idx, next_partition] = 1  # 一次性设置整批的one-hot编码
+            
+            # 填充固定特征(权重和度)
+            fixed_features = torch.tensor(
+                np.column_stack((self.node_weights, self.node_degrees)), 
+                dtype=torch.float32, device=self.device)
+            batch_x[start_idx:end_idx, self.num_partitions:] = fixed_features
+            batch_next_x[start_idx:end_idx, self.num_partitions:] = fixed_features
+        
+        # ========= 优化: 高效构建批处理边索引 =========
+        # 一次性构建批处理边索引
+        if not hasattr(self, 'cached_batch_edge_indices') or self.cached_batch_edge_indices is None:
+            # 预先计算偏移边索引，避免在每次训练中重复计算
+            cached_edges = []
+            for i in range(self.batch_size):
+                offset = i * self.num_nodes
+                # 复制边索引并添加偏移
+                batch_edge = self.edge_index.clone()
+                batch_edge[0, :] += offset
+                batch_edge[1, :] += offset
+                cached_edges.append(batch_edge)
+            
+            # 将所有边索引连接成一个大的边索引张量 - 这只需要计算一次
+            self.cached_batch_edge_indices = torch.cat(cached_edges, dim=1)
+        
+        # 使用缓存的边索引
+        batch_edge_index = self.cached_batch_edge_indices
+        
+        # 创建批次索引张量
+        batch_idx = torch.arange(self.batch_size, device=self.device).repeat_interleave(self.num_nodes)
+        
         # 计算当前Q值
         current_q_values = self.model(batch_x, batch_edge_index)
         
@@ -282,44 +300,26 @@ class GNNDQNAgent:
         node_ids = batch_actions // self.num_partitions
         partition_ids = batch_actions % self.num_partitions
         
-        selected_q_values = []
-        for i in range(self.batch_size):
-            # 计算全局节点索引
-            global_node_idx = i * self.num_nodes + node_ids[i]
-            # 获取该节点对选定分区的Q值
-            if global_node_idx < batch_x.size(0):  # 检查索引是否在范围内
-                selected_q_values.append(current_q_values[global_node_idx, partition_ids[i]])
-                
-        if not selected_q_values:  # 如果列表为空
-            print("警告: 没有有效的Q值可用于训练")
-            return 0.0
-            
-        # 转换为张量
-        selected_q_values = torch.stack(selected_q_values)
+        # ========= 优化: 向量化Q值选择 =========
+        # 计算全局节点索引
+        global_node_indices = torch.arange(self.batch_size, device=self.device) * self.num_nodes + node_ids
         
-        # --- 使用向量化计算目标Q值 ---
+        # 直接从current_q_values中提取选定的Q值
+        selected_q_values = current_q_values[global_node_indices, partition_ids]
+        
+        # ========= 优化: 向量化计算目标Q值 =========
         with torch.no_grad():
             # 计算下一状态的Q值
             next_q_values = self.target_model(batch_next_x, batch_edge_index)
             
-            # 找出每个图中最大的Q值
-            max_q_values = []
-            for i in range(self.batch_size):
-                # 计算当前批次的节点范围
-                start_idx = i * self.num_nodes
-                end_idx = (i + 1) * self.num_nodes
-                
-                # 获取当前样本中所有节点的Q值
-                batch_q_values = next_q_values[start_idx:end_idx]
-                
-                # 找出每个节点最大的Q值
-                node_max_q = batch_q_values.max(dim=1)[0]
-                
-                # 然后找出该样本所有节点中的最大值
-                max_q_values.append(node_max_q.max())
+            # 重塑为(batch_size, num_nodes, num_partitions)以便找出每个图的最大Q值
+            reshaped_next_q = next_q_values.view(self.batch_size, self.num_nodes, self.num_partitions)
             
-            # 转换为张量
-            max_q_values = torch.stack(max_q_values)
+            # 对每个节点找出最大Q值
+            node_max_q = reshaped_next_q.max(dim=2)[0]  # [batch_size, num_nodes]
+            
+            # 对每个图找出最大Q值
+            max_q_values = node_max_q.max(dim=1)[0]  # [batch_size]
             
             # 计算目标Q值
             target_q_values = batch_rewards + (1 - batch_dones) * self.gamma * max_q_values
@@ -327,17 +327,9 @@ class GNNDQNAgent:
         # 计算损失
         loss = F.mse_loss(selected_q_values, target_q_values)
         
-        # 调试信息 - 检查loss是否为0或NaN
-        if loss.item() == 0 or torch.isnan(loss):
-            print(f"警告: Loss值异常: {loss.item()}")
-            print(f"选定Q值: {selected_q_values}")
-            print(f"目标Q值: {target_q_values}")
-            print(f"奖励范围: [{batch_rewards.min().item()}, {batch_rewards.max().item()}]")
-        
         # 梯度更新
         self.optimizer.zero_grad()
         loss.backward()
-        # 添加梯度剪裁以提高稳定性
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         
