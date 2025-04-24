@@ -162,6 +162,16 @@ class GNNPPOAgent:
         self.prefetch_data = None
         self.prefetch_actions = None
 
+        # 添加TensorBoard支持
+        from tensorboard_logger import TensorboardLogger
+        tensorboard_config = config.get('tensorboard_config', {})
+        self.use_tensorboard = config.get('use_tensorboard', True)
+        if self.use_tensorboard:
+            self.logger = TensorboardLogger(tensorboard_config)
+            self.logger.experiment_name = "gnn_ppo_agent"  # 为GNN-PPO设置特殊名称
+        else:
+            self.logger = None
+
     def _build_graph_structure(self):
         """构建PyG的图数据结构"""
         # 创建边索引
@@ -532,6 +542,21 @@ class GNNPPOAgent:
                 total_loss += loss.item()
                 update_rounds += 1
 
+                # 在损失计算后记录
+                if self.logger is not None and len(self.rewards) > 0:
+                    self.logger.log_episode(
+                        self.rewards,
+                        loss.item(),
+                        entropy.mean().item(),
+                        value_loss.item(),
+                        policy_loss.item()
+                    )
+
+                    # 记录节点嵌入的直方图 (GNN特有)
+                    if hasattr(self.policy,
+                               'node_embeddings') and self.logger.episode_count % self.logger.histogram_freq == 0:
+                        embeddings = self.policy.node_embeddings
+                        self.logger.log_histogram("gnn/node_embeddings", embeddings, self.logger.episode_count)
         # 清空缓冲区
         self._clear_buffers()
         
@@ -539,6 +564,7 @@ class GNNPPOAgent:
         
         # 返回平均损失
         return total_loss / max(1, update_rounds)
+
     
     # 【优化25】添加向量化的GAE计算
     def _compute_returns_advantages_vectorized(self):

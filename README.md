@@ -68,9 +68,15 @@
 5. skysegment与test对比：
     - dqn_basic中episode=10000，sky只需要不到一分钟，但是epsd=500 test要五分钟
     - 
-   
 
-
+6. 性能分析：
+   - 使用tensorboard和Nsight systems进行性能分析
+   - Nsight System：nsys profile --stats=true -o /home/zhousui/pyproj/ python run_experiments.py
+     - CPU 时间主要分散在 Python 解释器本身、CUDA/PyTorch 的 CPU/CUDA 后端库以及标准 C 库中。这再次印证了 CPU 在执行高层逻辑、进行系统调用和与 GPU 交互时花费了大量时间。高 CPU 利用率 (99.99% 的进程利用率) 并不意味着 CPU 在有效计算
+       结合 osrtsum 的报告，它更可能意味着 CPU 线程在忙碌地等待（spin-waiting 或处于等待状态）。
+     - CUDA Driver/Nsight Systems 版本不匹配 (Warning 4): 这是之前无法看到 GPU Kernel 和 Memory Activity 数据的主要原因
+     - 无法跟踪 Unified Memory (Error 5): 可能与版本不匹配或硬件/配置有关。解决版本不匹配问题可能也会解决或改变这个错误
+     - 
 
 
 

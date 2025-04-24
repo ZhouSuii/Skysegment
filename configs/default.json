@@ -1,7 +1,7 @@
 {
-    "episodes": 500,
+    "episodes": 1000,
     "max_steps": 100,
-    "batch_size": 512,
+    "batch_size": 128,
     "methods": [
         "random",
         "greedy",
@@ -44,7 +44,7 @@
         "clip_ratio": 0.2,
         "learning_rate": 0.0003,
         "ppo_epochs": 10,
-        "batch_size": 32,
+        "batch_size": 512,
         "entropy_coef": 0.01,
         "value_coef": 0.5
     },
@@ -54,11 +54,16 @@
         "clip_ratio": 0.2,
         "learning_rate": 0.0003,
         "ppo_epochs": 10,
-        "batch_size": 32,
+        "batch_size": 512,
         "entropy_coef": 0.01,
         "value_coef": 0.5,
         "hidden_dim": 256,
         "jit_compile": true,
         "use_cuda_streams": true
+    },
+    "tensorboard_config": {
+        "log_dir": "runs",
+        "log_freq": 1,
+        "histogram_freq": 10
     }
 }

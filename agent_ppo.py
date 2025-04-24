@@ -111,6 +111,20 @@ class PPOAgent:
         else:
             self.pin_memory = False
 
+        # tensorboard
+        from tensorboard_logger import TensorboardLogger
+        tensorboard_config = config.get('tensorboard_config', {})
+        self.use_tensorboard = config.get('use_tensorboard', True)
+        if self.use_tensorboard:
+            self.logger = TensorboardLogger(tensorboard_config)
+        else:
+            self.logger = None
+
+        # 添加额外指标跟踪
+        self.policy_loss_history = []
+        self.value_loss_history = []
+        self.entropy_history = []
+
     def act(self, state):
         """根据当前状态选择动作"""
         # 将状态展平并转移到GPU
@@ -224,9 +238,34 @@ class PPOAgent:
                 # 计算价值损失
                 value_loss = F.mse_loss(values, batch_returns)
 
+                entropy_mean = entropy.mean()
+                # 记录历史值
+                self.policy_loss_history.append(policy_loss.item())
+                self.value_loss_history.append(value_loss.item())
+                self.entropy_history.append(entropy_mean.item())
+
                 # 计算总损失
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy.mean()
                 total_loss += loss.item()
+
+                # 更新后增加TensorBoard记录
+                if self.logger is not None and len(self.rewards) > 0:
+                    self.logger.log_episode(
+                        self.rewards,
+                        loss.item(),
+                        entropy_mean.item(),
+                        value_loss.item(),
+                        policy_loss.item()
+                    )
+
+                    # 每隔histogram_freq记录参数直方图
+                    if self.logger.episode_count % self.logger.histogram_freq == 0:
+                        self.logger.log_network(self.policy)
+
+                        # 记录优势函数和回报分布
+                        if len(advantages) > 0:
+                            self.logger.log_histogram("advantage/distribution", advantages, self.logger.episode_count)
+                            self.logger.log_histogram("returns/distribution", returns, self.logger.episode_count)
 
                 # 执行优化
                 self.optimizer.zero_grad()
@@ -326,6 +365,8 @@ class PPOAgent:
     def save_model(self, filepath):
         """保存模型到文件"""
         torch.save(self.policy.state_dict(), filepath)
+        if self.logger is not None:
+            self.logger.close()
 
     def load_model(self, filepath):
         """从文件加载模型"""

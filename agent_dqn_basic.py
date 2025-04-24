@@ -92,6 +92,15 @@ class DQNAgent:
             'next_state': torch.zeros((self.batch_size, self.state_size), device=self.device, dtype=torch.float32),
             'done': torch.zeros((self.batch_size), device=self.device, dtype=torch.float32),
         }
+        # 添加TensorBoard支持
+        from tensorboard_logger import TensorboardLogger
+        tensorboard_config = config.get('tensorboard_config', {})
+        self.use_tensorboard = config.get('use_tensorboard', True)
+        if self.use_tensorboard:
+            self.logger = TensorboardLogger(tensorboard_config)
+            self.logger.experiment_name = "dqn_agent"
+        else:
+            self.logger = None
 
     def update_target_model(self):
         """更新目标网络的参数"""
@@ -126,16 +135,28 @@ class DQNAgent:
             return random.randrange(self.action_size)
 
         # 利用：使用模型预测最佳动作
-        state_tensor = torch.FloatTensor(np.array(state).flatten()).to(self.device)
+        state_array = np.array(state).flatten()
+        state_tensor = torch.FloatTensor(state_array).unsqueeze(0).to(self.device)
+
+        # 将模型设置为评估模式
+        self.model.eval()
+
         with torch.no_grad():
             act_values = self.model(state_tensor)
             
             # 如果有动作掩码，将无效动作设为极小值
             if action_mask is not None:
-                mask_tensor = torch.FloatTensor(action_mask).to(self.device)
+                mask_tensor = torch.FloatTensor(action_mask).unsqueeze(0).to(self.device)
+                if mask_tensor.shape != act_values.shape:
+                     print(f"警告: act_values shape {act_values.shape} 与 mask_tensor shape {mask_tensor.shape} 不匹配！")
+                     # 尝试调整掩码形状，但这可能指示更深层的问题
+                     mask_tensor = mask_tensor.view(act_values.shape)
+    
                 invalid_mask = 1.0 - mask_tensor
                 act_values = act_values - invalid_mask * 1e9
-                
+        
+        self.model.train()
+
         return torch.argmax(act_values).item()
 
     def replay(self, batch_size=None):
@@ -170,7 +191,17 @@ class DQNAgent:
         
         # 计算损失并优化
         loss = nn.MSELoss()(current_q_values_selected, expected_q_values)
-        
+
+        # 在损失计算后记录
+        if self.logger is not None and self.train_count % self.logger.log_freq == 0:
+            self.logger.log_scalar("losses/q_loss", loss.item(), self.train_count)
+            self.logger.log_scalar("dqn/epsilon", self.epsilon, self.train_count)
+
+            # 记录Q值分布
+            if self.train_count % self.logger.histogram_freq == 0:
+                self.logger.log_histogram("q_values/distribution", current_q_values.detach(), self.train_count)
+                self.logger.log_network(self.model)
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()

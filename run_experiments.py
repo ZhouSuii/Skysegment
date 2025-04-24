@@ -83,7 +83,7 @@ def train_dqn_agent(graph, num_partitions, config):
     # 获取配置参数
     episodes = config.get("episodes", 1000)
     max_steps = config.get("max_steps", 100)
-    batch_size = config.get("batch_size", 32)
+    batch_size = config.get("dqn_config", {}).get("batch_size", config.get("batch_size", 32))
 
     # 初始化环境
     env = GraphPartitionEnvironment(graph, num_partitions, max_steps)
@@ -92,7 +92,9 @@ def train_dqn_agent(graph, num_partitions, config):
     num_nodes = len(graph.nodes())
     state_size = num_nodes * (num_partitions + 1)  # 扁平化后的状态大小
     action_size = num_nodes * num_partitions
-    agent = DQNAgent(state_size, action_size, config.get("dqn_config", {}))
+    dqn_config = config.get("dqn_config", {})
+    dqn_config['batch_size'] = batch_size # 传递正确的batch_size给agent
+    agent = DQNAgent(state_size, action_size, dqn_config)
 
     best_reward = float('-inf')
     best_partition = None
@@ -117,10 +119,13 @@ def train_dqn_agent(graph, num_partitions, config):
 
             if done:
                 break
+        
+        # 使用 agent.memory_counter 获取实际存储的样本数
+        memory_size = min(agent.memory_counter, agent.memory_capacity)
 
         # 进行经验回放学习
-        if len(agent.memory) >= batch_size:
-            loss = agent.replay()  # 获取返回的损失值
+        if memory_size >= batch_size:
+            loss = agent.replay(batch_size)  # 获取返回的损失值
             loss_history.append(loss)  # 记录损失
         else:
             loss_history.append(0.0)  # 如果没有学习，记录0损失
@@ -151,7 +156,7 @@ def train_dqn_agent(graph, num_partitions, config):
         })
 
         # 每50个episode保存一次模型
-        if (e + 1) % 10 == 0:
+        if (e + 1) % 50 == 0:
             os.makedirs("results/models", exist_ok=True)
             agent.save_model(f"results/models/dqn_model_{len(graph.nodes())}nodes_{num_partitions}parts_temp.pt")
 
@@ -199,8 +204,11 @@ def train_gnn_agent(graph, num_partitions, config):
             if done:
                 break
 
+        # 检查内存池大小 - 使用memory_counter而不是len(agent.memory)
+        memory_size = min(agent.memory_counter, agent.memory_capacity)
+
         # 进行经验回放学习
-        if len(agent.memory) >= batch_size:
+        if memory_size >= batch_size:
             loss = agent.replay()  # 获取返回的损失值
             loss_history.append(loss)  # 记录损失
         else:
@@ -232,7 +240,7 @@ def train_gnn_agent(graph, num_partitions, config):
         })
 
         # 每10个episode保存一次模型
-        if (e + 1) % 10 == 0:
+        if (e + 1) % 50 == 0:
             os.makedirs("results/models", exist_ok=True)
             agent.save_model(f"results/models/gnn_model_{len(graph.nodes())}nodes_{num_partitions}parts_temp.pt")
 
@@ -269,6 +277,7 @@ def train_ppo_agent(graph, num_partitions, config):
     for e in progress_bar:
         state, _ = env.reset()
         total_reward = 0
+        step_rewards = []
 
         for step in range(max_steps):
             action = agent.act(state)
@@ -277,6 +286,12 @@ def train_ppo_agent(graph, num_partitions, config):
             agent.store_transition(reward, done)
             state = next_state
             total_reward += reward
+            step_rewards.append(reward)
+
+            # 记录单步信息
+            if agent.logger is not None and e % agent.logger.log_freq == 0:
+                agent.logger.log_scalar("step/reward", reward, agent.logger.step_count)
+                agent.logger.step_count += 1
 
             if done:
                 break
@@ -291,8 +306,22 @@ def train_ppo_agent(graph, num_partitions, config):
         weight_variance = np.var(partition_weights)
         variance_history.append(weight_variance)
 
+        # 记录额外指标
+        if agent.logger is not None:
+            metrics = {
+                "performance/weight_variance": weight_variance,
+                "performance/total_steps": step + 1
+            }
+            agent.logger.log_metrics(metrics, e)
+
         # 更新进度条
-        progress_bar.set_postfix({"奖励": f"{total_reward:.2f}", "最佳": f"{best_reward:.2f}"})
+        progress_bar.set_postfix({
+            'reward': total_reward,
+            'best': best_reward,
+            'epsilon': agent.epsilon,
+            'loss': loss_history[-1] if loss_history else 0,
+            'variance': variance_history[-1] if variance_history else 0
+        })
 
         # 保存最佳结果
         if total_reward > best_reward:
@@ -353,7 +382,13 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
         variance_history.append(weight_variance)
 
         # 更新进度条
-        progress_bar.set_postfix({"奖励": f"{total_reward:.2f}", "最佳": f"{best_reward:.2f}"})
+        progress_bar.set_postfix({
+            'reward': total_reward,
+            'best': best_reward,
+            'epsilon': agent.epsilon,
+            'loss': loss_history[-1] if loss_history else 0,
+            'variance': variance_history[-1] if variance_history else 0
+        })
 
         # 保存最佳结果
         if total_reward > best_reward:
