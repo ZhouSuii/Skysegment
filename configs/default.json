@@ -3,14 +3,14 @@
     "max_steps": 100,
     "batch_size": 128,
     "methods": [
-        "random",
+        "gnn_ppo",
+        "gnn",
+        "ppo",
         "greedy",
         "spectral",
         "metis",
         "dqn",
-        "gnn",
-        "ppo",
-        "gnn_ppo"
+        "random"
     ],
     "dqn_config": {
         "memory_size": 2000,
@@ -22,7 +22,7 @@
         "hidden_sizes": [256, 256],
         "target_update_freq": 10,
         "jit_compile": true,
-        "batch_size": 512
+        "batch_size": 128
     },
     "gnn_config": {
         "memory_size": 2000,
@@ -36,7 +36,7 @@
         "num_layers": 2,       
         "dropout_rate": 0.1,   
         "jit_compile": false,   
-        "batch_size": 512      
+        "batch_size": 128      
     },
     "ppo_config": {
         "gamma": 0.99,
@@ -44,7 +44,7 @@
         "clip_ratio": 0.2,
         "learning_rate": 0.0003,
         "ppo_epochs": 10,
-        "batch_size": 512,
+        "batch_size": 128,
         "entropy_coef": 0.01,
         "value_coef": 0.5
     },
@@ -54,7 +54,7 @@
         "clip_ratio": 0.2,
         "learning_rate": 0.0003,
         "ppo_epochs": 10,
-        "batch_size": 512,
+        "batch_size": 128,
         "entropy_coef": 0.01,
         "value_coef": 0.5,
         "hidden_dim": 256,

@@ -8,6 +8,8 @@
 /bluesky
 /results
 /runs
+*.nsys-rep
+*.prof
 
 # Potentially locally-copied BADA installation
 /bluesky/resources/performance/BADA/*
