@@ -76,9 +76,17 @@
        结合 osrtsum 的报告，它更可能意味着 CPU 线程在忙碌地等待（spin-waiting 或处于等待状态）。
      - CUDA Driver/Nsight Systems 版本不匹配 (Warning 4): 这是之前无法看到 GPU Kernel 和 Memory Activity 数据的主要原因
      - 无法跟踪 Unified Memory (Error 5): 可能与版本不匹配或硬件/配置有关。解决版本不匹配问题可能也会解决或改变这个错误
-     - 
+7. 尝试思路：
+    - 超参数调优AHPO：使用optuna来进行四个算法的超参数化调优
+    - 尝试将runexperiments拆分成四个脚本，一次运行多个算法看看能不能提高gpu占用和减少运行时间
+        - 运行方式 CUDA_VISIBLE_DEVICES=0/1 python run_shell.py [num_nodes]/[json_location]
+        - 失败，虽然在一个gpu上同时执行两个任务会让gpu占用大幅上升，但是流多处理器利用率提高并未带来速度的提升，思路失败
 
-
+8. 经验之谈：
+    - 安装Nsight Systems
+        - 直接wget最新版，要注意版本兼容
+        - 注意内核要配置perf_event_paranoid选项，否则不支持某些CPU性能追踪功能
+    
 
 
 算法的实现与优化都感觉一个非常非常庞大的任务，很多时候都是在摸黑操作，像计算机一样的精密结构牵一发而动全身
