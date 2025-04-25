@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pandas as pd
 import json
+import torch
 from tqdm import tqdm
 
 # 配置中文字体支持 - 添加此段代码
@@ -635,6 +636,18 @@ def plot_comparison(graph_name, results, results_dir):
 
 
 def main():
+    # 限制 PyTorch 和底层库使用的线程数，减少后台线程空闲等待
+    # 建议设置为物理核心数，例如 4 或 8，根据您的服务器调整
+    num_threads = 4
+    torch.set_num_threads(num_threads)
+    os.environ['OMP_NUM_THREADS'] = str(num_threads)
+    os.environ['MKL_NUM_THREADS'] = str(num_threads)
+    print(f"限制 PyTorch/OMP/MKL 线程数为: {num_threads}")
+
+    # 添加这两行禁用强制同步
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+    os.environ['CUDA_FORCE_PTX_JIT'] = '0'
+
     """主函数"""
     # 创建必要的目录
     os.makedirs("results", exist_ok=True)
