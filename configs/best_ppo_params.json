@@ -1,0 +1,12 @@
+{
+    "learning_rate": 0.0002368140184225926,
+    "hidden_dim": 128,
+    "gamma": 0.966382464092941,
+    "gae_lambda": 0.947215353198062,
+    "clip_ratio": 0.21991770987453751,
+    "ppo_epochs": 2,
+    "batch_size": 256,
+    "entropy_coef": 0.015247864825037727,
+    "value_coef": 0.5024500810050793,
+    "update_frequency": 9
+}

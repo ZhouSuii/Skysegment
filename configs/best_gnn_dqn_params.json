@@ -1,0 +1,10 @@
+{
+    "learning_rate": 0.00017085526785800263,
+    "hidden_dim": 512,
+    "num_layers": 2,
+    "dropout_rate": 0.16357126631195013,
+    "gamma": 0.9657705542869388,
+    "epsilon_decay": 0.9972364678634627,
+    "batch_size": 256,
+    "target_update_freq": 9
+}

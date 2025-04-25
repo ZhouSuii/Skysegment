@@ -1,0 +1,12 @@
+{
+    "learning_rate": 0.00034139312481129536,
+    "hidden_sizes": [
+        512,
+        256
+    ],
+    "gamma": 0.9355503375379669,
+    "epsilon_decay": 0.9914169484915103,
+    "batch_size": 512,
+    "target_update_freq": 15,
+    "memory_capacity": 2000
+}
