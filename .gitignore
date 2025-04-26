@@ -11,6 +11,8 @@
 *.nsys-rep
 *.prof
 .github/
+*.sqlite
+*.db
 
 # Potentially locally-copied BADA installation
 /bluesky/resources/performance/BADA/*

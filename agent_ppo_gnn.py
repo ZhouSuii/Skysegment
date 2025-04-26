@@ -429,10 +429,17 @@ class GNNPPOAgent:
         conversion_end = time.time()
         self.conversion_time += conversion_end - start
 
+        value = 0.0 # 初始化 value
+        log_prob = None # 初始化 log_prob
+        action = 0 # 初始化 action
+
         with torch.no_grad():
-            action, log_prob = self.policy.act(state_data)
-            _, values = self.policy(state_data)
-            value = values.mean().item()  # 使用所有节点值的平均作为状态价值
+            action_tensor, log_prob_tensor = self.policy.act(state_data)
+            action = action_tensor # .item() 已经在 policy.act 中处理
+            log_prob = log_prob_tensor
+
+            _, values_nodes = self.policy(state_data) # policy forward 返回 probs, values
+            value = values_nodes.mean().item()  # 使用所有节点值的平均作为状态价值
                 
         self.forward_time += time.time() - conversion_end
 
@@ -445,12 +452,17 @@ class GNNPPOAgent:
         # 【优化18】增加更新计数
         self.update_counter += 1
 
-        return action
+        return action, log_prob, value
 
     def store_transition(self, reward, done):
         """存储奖励和状态终止信号"""
         self.rewards.append(reward)
         self.dones.append(done)
+
+    def should_update(self):
+        """检查是否达到了更新频率"""
+        # 确保缓冲区中有足够的数据，并且计数器达到频率
+        return len(self.rewards) >= self.update_frequency and self.update_counter >= self.update_frequency
 
     @torch.jit.script_if_tracing
     def _forward_jit(self, x, edge_index):
@@ -462,7 +474,7 @@ class GNNPPOAgent:
 
     def update(self):
         """优化的PPO算法更新，使用subgraph简化子图构建和向量化操作减少同步点"""
-        if self.update_counter < self.update_frequency:
+        if not self.should_update():
             return 0.0
 
         self.update_counter = 0

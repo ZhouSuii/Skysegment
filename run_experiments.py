@@ -361,8 +361,8 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
         total_reward = 0
 
         for step in range(max_steps):
-            action = agent.act(state)
-            next_state, reward, done, _, _ = env.step(action)
+            actual_action, log_prob, value = agent.act(state) # 解包元组，获取实际动作
+            next_state, reward, done, _, _ = env.step(actual_action) # 将实际动作整数传递给 env.step
 
             agent.store_transition(reward, done)
             state = next_state
