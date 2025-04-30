@@ -11,6 +11,9 @@
 *.nsys-rep
 *.sqlite
 *.prof
+.github/
+*.sqlite
+*.db
 /.github
 
 # Potentially locally-copied BADA installation

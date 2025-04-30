@@ -82,7 +82,7 @@ class PPOAgent:
         self.update_frequency = config.get('update_frequency', 4)  # 每4个episode更新一次
         
         # 优化点7: 使用更紧凑的缓冲区，并预分配
-        self.memory_capacity = config.get('memory_capacity', 10000) # Add memory capacity config
+        self.memory_capacity = config.get('memory_capacity', 20000) # Add memory capacity config
         self.states_buffer = np.zeros((self.memory_capacity, state_size), dtype=np.float32)
         self.actions = np.zeros(self.memory_capacity, dtype=np.int64)
         self.log_probs = np.zeros(self.memory_capacity, dtype=np.float32)
