@@ -10,14 +10,13 @@ import json
 import torch
 from tqdm import tqdm
 
-# 配置中文字体支持 - 添加此段代码
+# 配置中文字体支持
 try:
     # 尝试使用文泉驿微米黑字体
     plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'DejaVu Sans', 'sans-serif']
     plt.rcParams['axes.unicode_minus'] = False  # 正确显示负号
     
     # 验证字体加载
-    mpl.font_manager._rebuild()
     plt.rcParams['font.family'] = 'sans-serif'  # 使用无衬线字体
 except Exception as e:
     print(f"字体配置错误: {e}，将使用默认字体")

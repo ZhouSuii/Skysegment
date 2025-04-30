@@ -1,5 +1,5 @@
 {
-    "episodes": 500,
+    "episodes": 3000,
     "max_steps": 100,
     "batch_size": 128,
     "methods": [
