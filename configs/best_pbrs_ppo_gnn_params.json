@@ -1,0 +1,19 @@
+{
+    "learning_rate": 0.0009178245459149215,
+    "hidden_dim": 384,
+    "num_layers": 3,
+    "dropout_rate": 0.4410177346379472,
+    "gamma": 0.9923949438252297,
+    "gae_lambda": 0.9667919365644023,
+    "clip_ratio": 0.25903986159937326,
+    "ppo_epochs": 10,
+    "batch_size": 64,
+    "entropy_coef": 0.0002537667966176027,
+    "value_coef": 0.4702979689913987,
+    "update_frequency": 2817,
+    "adam_beta1": 0.9142501163568205,
+    "adam_beta2": 0.9908261749449218,
+    "pbrs_variance_weight": 3.6263409698687026,
+    "pbrs_edge_cut_weight": 0.4461827081071835,
+    "pbrs_modularity_weight": 0.15661647836919
+}

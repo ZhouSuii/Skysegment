@@ -20,18 +20,15 @@ class GraphPartitionEnvironment(gym.Env):
         self.num_partitions = num_partitions
 
         # action space: 选择一个节点并将其分配到一个分区
-        # 分离动作选择：先选节点，再选分区
-        self.action_space = spaces.Tuple((
-            spaces.Discrete(self.num_nodes),  # 选择节点
-            spaces.Discrete(self.num_partitions)  # 选择目标分区
-        ))
+        # CHANGED: 使用扁平化的动作空间
+        self.action_space = spaces.Discrete(self.num_nodes * self.num_partitions)
 
         # state space
-        # CHANGED: 状态增加节点的度信息，因此多出一列，用于存储归一化后的节点度
-        # 形状 = [self.num_nodes, self.num_partitions + 1]
+        # CHANGED: 状态增加节点的度信息和权重信息，因此多出两列
+        # 形状 = [self.num_nodes, self.num_partitions + 2]
         self.observation_space = spaces.Box(    # box：连续空间
             low=0, high=1,
-            shape=(self.num_nodes, self.num_partitions + 1),
+            shape=(self.num_nodes, self.num_partitions + 2), # 修正形状
             dtype=np.float32
         )
 
