@@ -89,6 +89,8 @@ class GNNDQNAgent:
         self.hidden_dim = config.get('hidden_dim', 128)
         self.num_layers = config.get('num_layers', 2)
         self.dropout_rate = config.get('dropout_rate', 0.1)
+        self.adam_beta1 = config.get('adam_beta1', 0.9)
+        self.adam_beta2 = config.get('adam_beta2', 0.999)
         
         # 检查GPU可用性
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -120,7 +122,11 @@ class GNNDQNAgent:
         # 预构建图结构
         self._build_graph_structure()
         
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        self.optimizer = optim.Adam(
+            self.model.parameters(),
+            lr=self.learning_rate,
+            betas=(self.adam_beta1, self.adam_beta2)
+        )
         self.update_target_model()
         
         # 训练计数器

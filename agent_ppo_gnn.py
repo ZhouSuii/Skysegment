@@ -111,15 +111,13 @@ class GNNPPOAgent:
         self.gae_lambda = config.get('gae_lambda', 0.95)
         self.clip_ratio = config.get('clip_ratio', 0.2)
         self.learning_rate = config.get('learning_rate', 0.0003)
-        
-        # 【优化7】减少PPO更新轮数，提高速度
-        self.ppo_epochs = config.get('ppo_epochs', 2)  # 从10降到4
-        self.batch_size = config.get('batch_size', 64)  # 增大批处理大小
+        self.ppo_epochs = config.get('ppo_epochs', 2)  
+        self.batch_size = config.get('batch_size', 64)
         self.entropy_coef = config.get('entropy_coef', 0.01)
         self.value_coef = config.get('value_coef', 0.5)
         self.hidden_dim = config.get('hidden_dim', 128)
-        
-        # 【优化8】添加更新频率参数，减少更新次数
+        self.adam_beta1 = config.get('adam_beta1', 0.9) 
+        self.adam_beta2 = config.get('adam_beta2', 0.999)
         self.update_frequency = config.get('update_frequency', 8) 
         self.update_counter = 0
         
@@ -139,7 +137,11 @@ class GNNPPOAgent:
         # 初始化策略网络
         self.policy = GNNPPOPolicy(self.node_features, self.hidden_dim,
                                    num_partitions, num_partitions).to(self.device)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
+        self.optimizer = torch.optim.Adam(
+            self.policy.parameters(),
+            lr=self.learning_rate,
+            betas=(self.adam_beta1, self.adam_beta2) # 传入 betas 元组
+        )
 
         # 【优化10】使用更高效的数据存储方式
         self.states = []
