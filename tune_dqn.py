@@ -7,23 +7,25 @@ from tqdm import tqdm
 import time
 import os
 
-from environment import GraphPartitionEnvironment
+from new_environment import GraphPartitionEnvironment
 from agent_dqn_basic import DQNAgent
 from metrics import evaluate_partition
 from run_experiments import create_test_graph
 
 # --- 配置 ---
-NUM_NODES = 10  # 使用中等大小的图进行调优
+NUM_NODES = 10                  # 使用中等大小的图进行调优
 NUM_PARTITIONS = 2
-N_TRIALS = 200  # Optuna试验次数
-TRAINING_EPISODES = 300  # 每次试验的训练回合数(减少以加快调优)
-MAX_STEPS_PER_EPISODE = 50  # 每回合最大步数
-OPTUNA_TIMEOUT = 3600  # 整个优化过程的超时时间(例如,1小时)
+N_TRIALS = 200                  # Optuna试验次数
+TRAINING_EPISODES = 300         # 每次试验的训练回合数(减少以加快调优)
+MAX_STEPS_PER_EPISODE = 50      # 每回合最大步数
+OPTUNA_TIMEOUT = 3600           # 整个优化过程的超时时间, 单位是秒s
 RESULTS_DIR = "results"
 CONFIGS_DIR = "configs"
 BEST_PARAMS_FILE = os.path.join(CONFIGS_DIR, "best_dqn_params.json")
 OPTUNA_RESULTS_FILE = os.path.join(RESULTS_DIR, "optuna_dqn_results.csv")
 OPTUNA_PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
+OPTUNA_DB_NAME = "optuna_dqn_study.db"
+DEFAULT_CONFIG_PATH = "configs/default.json" # 定义默认配置文件路径
 
 # 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -37,8 +39,28 @@ def objective(trial: optuna.Trial):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"试验 {trial.number}: 开始于设备 {device}")
 
-    # 1. 建议超参数
-    # 搜索空间设计考虑了效率和影响
+    # --- 修改：加载 default.json 获取 PBRS 权重 ---
+    loaded_potential_weights = None
+    default_pbrs_weights = {'variance': 1.0, 'edge_cut': 1.0, 'modularity': 1.0}
+    try:
+        if os.path.exists(DEFAULT_CONFIG_PATH):
+            with open(DEFAULT_CONFIG_PATH, 'r') as f:
+                default_config_data = json.load(f)
+                if "potential_weights" in default_config_data:
+                    loaded_potential_weights = default_config_data["potential_weights"]
+                    print(f"试验 {trial.number}: 从 {DEFAULT_CONFIG_PATH} 加载 PBRS 权重: {loaded_potential_weights}")
+                else:
+                    print(f"警告: 在 {DEFAULT_CONFIG_PATH} 中未找到 'potential_weights' 键。")
+        else:
+            print(f"警告: 默认配置文件 {DEFAULT_CONFIG_PATH} 不存在。")
+    except Exception as e:
+        print(f"警告: 加载 {DEFAULT_CONFIG_PATH} 出错: {e}。")
+
+    # 如果加载失败或未找到，则使用硬编码的默认值
+    potential_weights_to_use = loaded_potential_weights if loaded_potential_weights else default_pbrs_weights
+    if not loaded_potential_weights:
+         print(f"试验 {trial.number}: 使用默认 PBRS 权重: {potential_weights_to_use}")
+
     config = {
         'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True),
         'hidden_sizes': trial.suggest_categorical('hidden_sizes', [[128, 128], [256, 128], [256, 256], [512, 256]]),
@@ -61,11 +83,17 @@ def objective(trial: optuna.Trial):
         # 2. 设置环境和智能体
         # 为每次试验创建不同的图，避免过拟合到特定图结构
         graph = create_test_graph(num_nodes=NUM_NODES, seed=trial.number)
-        env = GraphPartitionEnvironment(graph, NUM_PARTITIONS, max_steps=MAX_STEPS_PER_EPISODE)
+        env = GraphPartitionEnvironment(
+            graph,
+            NUM_PARTITIONS,
+            max_steps=MAX_STEPS_PER_EPISODE,
+            gamma=config['gamma'],
+            potential_weights=potential_weights_to_use # 使用获取到的权重
+        )
 
         # 计算状态和动作空间大小
         num_nodes = len(graph.nodes())
-        state_size = num_nodes * (NUM_PARTITIONS + 1)  # 扁平化状态大小
+        state_size = num_nodes * (NUM_PARTITIONS + 2)  # 扁平化状态大小
         action_size = num_nodes * NUM_PARTITIONS
 
         agent = DQNAgent(state_size, action_size, config=config)
@@ -163,12 +191,23 @@ def objective(trial: optuna.Trial):
 if __name__ == "__main__":
     # 创建或加载研究
     study_name = "dqn-partitioning-optimization"
-    
+
     # 使用MedianPruner提前停止没有希望的试验
     pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=TRAINING_EPISODES // 4, interval_steps=10)
-    study = optuna.create_study(direction='minimize', pruner=pruner)
+
+    # --- 修改：配置 SQLite 存储 ---
+    storage_name = f"sqlite:///{OPTUNA_DB_NAME}"
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=storage_name, # 指定存储
+        load_if_exists=True, # 如果数据库存在则加载
+        direction='minimize',
+        pruner=pruner
+    )
+    # --- 修改结束 ---
 
     print(f"开始DQN的Optuna优化，共{N_TRIALS}次试验 (超时: {OPTUNA_TIMEOUT}s)...")
+    print(f"数据库存储: {storage_name}")
     print(f"图大小: {NUM_NODES}个节点, {NUM_PARTITIONS}个分区")
     print(f"每次试验训练: {TRAINING_EPISODES}个回合, {MAX_STEPS_PER_EPISODE}步/回合")
 
@@ -182,6 +221,7 @@ if __name__ == "__main__":
 
     # --- 结果 ---
     print("\n" + "="*20 + " 优化完成! " + "="*20)
+    print(f"数据库: {storage_name}")
     print(f"完成的试验数: {len(study.trials)}")
 
     # 查找并打印最佳试验
