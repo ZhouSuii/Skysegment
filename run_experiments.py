@@ -21,7 +21,9 @@ try:
 except Exception as e:
     print(f"字体配置错误: {e}，将使用默认字体")
 
-from environment import GraphPartitionEnvironment
+# --- 修改：导入 new_environment ---
+from new_environment import GraphPartitionEnvironment
+# --- 修改结束 ---
 from agent_dqn_basic import DQNAgent
 from metrics import evaluate_partition
 from baselines import random_partition, weighted_greedy_partition, metis_partition, spectral_partition
@@ -84,15 +86,26 @@ def train_dqn_agent(graph, num_partitions, config):
     episodes = config.get("episodes", 1000)
     max_steps = config.get("max_steps", 100)
     batch_size = config.get("dqn_config", {}).get("batch_size", config.get("batch_size", 32))
+    dqn_config = config.get("dqn_config", {}) # 获取DQN配置
 
-    # 初始化环境
-    env = GraphPartitionEnvironment(graph, num_partitions, max_steps)
+    # --- 修改：使用 new_environment 并传递参数 ---
+    # 使用默认的 potential_weights 或从配置加载
+    default_potential_weights = {'variance': 1.0, 'edge_cut': 1.0, 'modularity': 1.0}
+    potential_weights = config.get("potential_weights", default_potential_weights)
+    env = GraphPartitionEnvironment(
+        graph,
+        num_partitions,
+        max_steps,
+        gamma=dqn_config.get('gamma', 0.95), # 从DQN配置获取gamma
+        potential_weights=potential_weights
+    )
 
     # 初始化DQN代理
     num_nodes = len(graph.nodes())
-    state_size = num_nodes * (num_partitions + 1)  # 扁平化后的状态大小
+    # --- 修改：更新状态大小计算 (+1 for node weights) ---
+    state_size = num_nodes * (num_partitions + 2)
+    # --- 修改结束 ---
     action_size = num_nodes * num_partitions
-    dqn_config = config.get("dqn_config", {})
     dqn_config['batch_size'] = batch_size # 传递正确的batch_size给agent
     agent = DQNAgent(state_size, action_size, dqn_config)
 
@@ -173,12 +186,22 @@ def train_gnn_agent(graph, num_partitions, config):
     episodes = config.get("episodes", 500)
     max_steps = config.get("max_steps", 100)
     batch_size = config.get("batch_size", 32)
+    gnn_config = config.get("gnn_config", {}) # 获取GNN配置
 
-    # 初始化环境
-    env = GraphPartitionEnvironment(graph, num_partitions, max_steps)
+    # --- 修改：使用 new_environment 并传递参数 ---
+    default_potential_weights = {'variance': 1.0, 'edge_cut': 1.0, 'modularity': 1.0}
+    potential_weights = config.get("potential_weights", default_potential_weights)
+    env = GraphPartitionEnvironment(
+        graph,
+        num_partitions,
+        max_steps,
+        gamma=gnn_config.get('gamma', 0.95), # 从GNN配置获取gamma
+        potential_weights=potential_weights
+    )
+    # --- 修改结束 ---
 
     # 初始化GNN-DQN代理
-    agent = GNNDQNAgent(graph, num_partitions, config.get("gnn_config", {}))
+    agent = GNNDQNAgent(graph, num_partitions, gnn_config)
 
     best_reward = float('-inf')
     best_partition = None
@@ -256,15 +279,27 @@ def train_ppo_agent(graph, num_partitions, config):
     # 获取配置参数
     episodes = config.get("episodes", 1000)
     max_steps = config.get("max_steps", 100)
+    ppo_config = config.get("ppo_config", {}) # 获取PPO配置
 
-    # 初始化环境
-    env = GraphPartitionEnvironment(graph, num_partitions, max_steps)
+    # --- 修改：使用 new_environment 并传递参数 ---
+    default_potential_weights = {'variance': 1.0, 'edge_cut': 1.0, 'modularity': 1.0}
+    potential_weights = config.get("potential_weights", default_potential_weights)
+    env = GraphPartitionEnvironment(
+        graph,
+        num_partitions,
+        max_steps,
+        gamma=ppo_config.get('gamma', 0.99), # 从PPO配置获取gamma
+        potential_weights=potential_weights
+    )
+    # --- 修改结束 ---
 
     # 初始化PPO代理
     num_nodes = len(graph.nodes())
-    state_size = num_nodes * (num_partitions + 1)  # 扁平化后的状态大小
+    # --- 修改：更新状态大小计算 (+1 for node weights) ---
+    state_size = num_nodes * (num_partitions + 2)
+    # --- 修改结束 ---
     action_size = num_nodes * num_partitions
-    agent = PPOAgent(state_size, action_size, config.get("ppo_config", {}))
+    agent = PPOAgent(state_size, action_size, ppo_config)
 
     best_reward = float('-inf')
     best_partition = None
@@ -340,12 +375,22 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
     # 获取配置参数
     episodes = config.get("episodes", 500)
     max_steps = config.get("max_steps", 100)
+    gnn_ppo_config = config.get("gnn_ppo_config", {}) # 获取GNN-PPO配置
 
-    # 初始化环境
-    env = GraphPartitionEnvironment(graph, num_partitions, max_steps)
+    # --- 修改：使用 new_environment 并传递参数 ---
+    default_potential_weights = {'variance': 1.0, 'edge_cut': 1.0, 'modularity': 1.0}
+    potential_weights = config.get("potential_weights", default_potential_weights)
+    env = GraphPartitionEnvironment(
+        graph,
+        num_partitions,
+        max_steps,
+        gamma=gnn_ppo_config.get('gamma', 0.99), # 从GNN-PPO配置获取gamma
+        potential_weights=potential_weights
+    )
+    # --- 修改结束 ---
 
     # 初始化GNN-PPO代理
-    agent = GNNPPOAgent(graph, num_partitions, config.get("gnn_ppo_config", {}))
+    agent = GNNPPOAgent(graph, num_partitions, gnn_ppo_config)
 
     best_reward = float('-inf')
     best_partition = None

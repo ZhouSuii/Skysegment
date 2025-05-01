@@ -8,7 +8,7 @@ import time
 import os
 import traceback # 导入 traceback
 
-from environment import GraphPartitionEnvironment
+from new_environment import GraphPartitionEnvironment
 from agent_ppo_gnn import GNNPPOAgent # 确保导入更新后的 Agent
 from metrics import evaluate_partition, calculate_partition_weights
 from run_experiments import create_test_graph # Or load graph
@@ -22,12 +22,13 @@ MAX_STEPS_PER_EPISODE = 50
 OPTUNA_TIMEOUT = 3600 * 6 # 增加超时时间 (例如, 6小时)
 RESULTS_DIR = "results"
 CONFIGS_DIR = "configs"
-BEST_PARAMS_FILE = os.path.join(CONFIGS_DIR, "best_gnn_ppo_params_v3.json") # 新文件名
-OPTUNA_DB_NAME = "optuna_gnn_ppo_study_v3.db" # 新数据库名
-OPTUNA_RESULTS_FILE = os.path.join(RESULTS_DIR, "optuna_gnn_ppo_results_v3.csv")
-OPTUNA_PLOTS_DIR = os.path.join(RESULTS_DIR, "plots_v3")
+BEST_PARAMS_FILE = os.path.join(CONFIGS_DIR, "best_gnn_ppo_params.json") # 新文件名
+OPTUNA_DB_NAME = "optuna_gnn_ppo_study.db" # 新数据库名
+OPTUNA_RESULTS_FILE = os.path.join(RESULTS_DIR, "optuna_gnn_ppo_results.csv")
+OPTUNA_PLOTS_DIR = os.path.join(RESULTS_DIR, "tune_ppo_gnn_plots")
 REPORT_INTERVAL = 50 # 每隔多少回合报告一次中间目标值
 IMBALANCE_PENALTY = 0.1 # 不平衡惩罚系数
+DEFAULT_CONFIG_PATH = "configs/default.json" # 定义默认配置文件路径
 
 # 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -40,6 +41,27 @@ def objective(trial: optuna.Trial):
     run_start_time = time.time()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"试验 {trial.number}: 开始于设备 {device}")
+
+    # --- 修改：加载 default.json 获取 PBRS 权重 ---
+    loaded_potential_weights = None
+    default_pbrs_weights = {'variance': 1.0, 'edge_cut': 1.0, 'modularity': 1.0}
+    try:
+        if os.path.exists(DEFAULT_CONFIG_PATH):
+            with open(DEFAULT_CONFIG_PATH, 'r') as f:
+                default_config_data = json.load(f)
+                if "potential_weights" in default_config_data:
+                    loaded_potential_weights = default_config_data["potential_weights"]
+                    print(f"试验 {trial.number}: 从 {DEFAULT_CONFIG_PATH} 加载 PBRS 权重: {loaded_potential_weights}")
+                else:
+                    print(f"警告: 在 {DEFAULT_CONFIG_PATH} 中未找到 'potential_weights' 键。")
+        else:
+            print(f"警告: 默认配置文件 {DEFAULT_CONFIG_PATH} 不存在。")
+    except Exception as e:
+        print(f"警告: 加载 {DEFAULT_CONFIG_PATH} 出错: {e}。")
+
+    potential_weights_to_use = loaded_potential_weights if loaded_potential_weights else default_pbrs_weights
+    if not loaded_potential_weights:
+         print(f"试验 {trial.number}: 使用默认 PBRS 权重: {potential_weights_to_use}")
 
     # 1. 建议超参数 (包含 GNN 和 PPO 特定参数)
     config = {
@@ -71,8 +93,13 @@ def objective(trial: optuna.Trial):
     try:
         # 2. 设置环境和智能体
         graph = create_test_graph(num_nodes=NUM_NODES, seed=trial.number % 10) # 复用种子
-        env = GraphPartitionEnvironment(graph, NUM_PARTITIONS, max_steps=MAX_STEPS_PER_EPISODE)
-        # 初始化 GNNPPOAgent
+        env = GraphPartitionEnvironment(
+            graph,
+            NUM_PARTITIONS,
+            max_steps=MAX_STEPS_PER_EPISODE,
+            gamma=config['gamma'],
+            potential_weights=potential_weights_to_use # 使用获取到的权重
+        )
         agent = GNNPPOAgent(graph, NUM_PARTITIONS, config=config)
 
         # 3. 训练循环
