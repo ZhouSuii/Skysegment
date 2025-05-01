@@ -12,6 +12,11 @@
         "ppo",
         "random"
     ],
+    "potential_weights": {
+        "variance": 3.6263409698687026,
+        "edge_cut": 0.4461827081071835,
+        "modularity": 0.15661647836919
+    },
     "dqn_config": {
         "learning_rate": 0.00034139312481129536,
         "hidden_sizes": [
