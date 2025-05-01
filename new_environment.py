@@ -20,15 +20,13 @@ class GraphPartitionEnvironment(gym.Env):
         self.num_partitions = num_partitions
 
         # action space: 选择一个节点并将其分配到一个分区
-        # CHANGED: 使用扁平化的动作空间
         self.action_space = spaces.Discrete(self.num_nodes * self.num_partitions)
 
         # state space
-        # CHANGED: 状态增加节点的度信息和权重信息，因此多出两列
         # 形状 = [self.num_nodes, self.num_partitions + 2]
         self.observation_space = spaces.Box(    # box：连续空间
             low=0, high=1,
-            shape=(self.num_nodes, self.num_partitions + 2), # 修正形状
+            shape=(self.num_nodes, self.num_partitions + 2),
             dtype=np.float32
         )
 
@@ -36,12 +34,10 @@ class GraphPartitionEnvironment(gym.Env):
         self.partition_assignment = np.zeros(self.num_nodes, dtype=int)
         self.node_weights = np.array([graph.nodes[i].get('weight', 1) for i in range(self.num_nodes)]) # Default weight to 1
 
-        # CHANGED: 保存节点度，并对其进行归一化
         degrees = np.array([graph.degree[i] for i in range(self.num_nodes)], dtype=float)
         max_degree = max(degrees) if len(degrees) > 0 else 1.0
         self.node_degrees = degrees / max_degree
 
-        # CHANGED: 增加记录当前步数的属性
         self.max_steps = max_steps
         self.current_step = 0
 
@@ -64,9 +60,7 @@ class GraphPartitionEnvironment(gym.Env):
              super().reset()
 
         # 随机初始化分区
-        # self.partition_assignment = self.action_space[1].sample() # Simpler way to get random partition index
         self.partition_assignment = np.random.randint(0, self.num_partitions, self.num_nodes)
-
 
         # 重置步数
         self.current_step = 0
@@ -77,7 +71,6 @@ class GraphPartitionEnvironment(gym.Env):
 
     def _get_state(self):
         # 状态组成：one-hot 分区、归一化节点度、归一化节点权重
-        # Let's update state to include normalized weight as well for GNN compatibility later
         # Shape = [self.num_nodes, self.num_partitions + 2] -> 分区 + 度 + 权重
         state = np.zeros((self.num_nodes, self.num_partitions + 2), dtype=np.float32)
         max_weight = np.max(self.node_weights) if len(self.node_weights) > 0 else 1.0
