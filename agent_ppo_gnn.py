@@ -118,8 +118,9 @@ class GNNPPOAgent:
         self.hidden_dim = config.get('hidden_dim', 128)
         self.adam_beta1 = config.get('adam_beta1', 0.9) 
         self.adam_beta2 = config.get('adam_beta2', 0.999)
-        self.update_frequency = config.get('update_frequency', 8) 
-        self.update_counter = 0
+        # 修改：将update_frequency更名为n_steps，并设置更合理的默认值
+        self.n_steps = config.get('n_steps', config.get('update_frequency', 128))
+        # 移除update_counter，我们直接使用buffer大小判断
         
         # 增加新的GPU优化配置
         self.hidden_dim = config.get('hidden_dim', 256)  # 增加默认隐藏层维度
@@ -419,7 +420,7 @@ class GNNPPOAgent:
             batch_data_list.append(data)
             
         return Batch.from_data_list(batch_data_list).to(self.device)
-
+    
     def act(self, state):
         """根据当前状态选择动作"""
         # 【优化17】使用计时器评估性能瓶颈
@@ -451,20 +452,17 @@ class GNNPPOAgent:
         self.log_probs.append(log_prob)
         self.values.append(value)
         
-        # 【优化18】增加更新计数
-        self.update_counter += 1
-
         return action, log_prob, value
 
     def store_transition(self, reward, done):
         """存储奖励和状态终止信号"""
         self.rewards.append(reward)
         self.dones.append(done)
-
+    
     def should_update(self):
         """检查是否达到了更新频率"""
-        # 确保缓冲区中有足够的数据，并且计数器达到频率
-        return len(self.rewards) >= self.update_frequency and self.update_counter >= self.update_frequency
+        # 确保缓冲区中有足够的数据
+        return len(self.rewards) >= self.n_steps
 
     @torch.jit.script_if_tracing
     def _forward_jit(self, x, edge_index):
@@ -476,10 +474,10 @@ class GNNPPOAgent:
 
     def update(self):
         """优化的PPO算法更新，使用subgraph简化子图构建和向量化操作减少同步点"""
-        if not self.should_update():
+        # 如果数据不足，直接返回
+        if len(self.rewards) < self.n_steps:
             return 0.0
 
-        self.update_counter = 0
         start = time.time()
 
         if len(self.rewards) == 0:

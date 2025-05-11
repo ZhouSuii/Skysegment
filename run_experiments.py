@@ -402,23 +402,34 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
     progress_bar = tqdm(range(episodes), desc="训练GNN-PPO")
     for e in progress_bar:
         state, _ = env.reset()
-        total_reward = 0
-
+        total_reward = 0        
         for step in range(max_steps):
             actual_action, log_prob, value = agent.act(state) # 解包元组，获取实际动作
             next_state, reward, done, _, _ = env.step(actual_action) # 将实际动作整数传递给 env.step
 
             agent.store_transition(reward, done)
+            
+            # 检查是否应该更新策略 - 重要更改：每步都检查，不再等到episode结束
+            if agent.should_update():
+                step_loss = agent.update()
+                # 记录当前更新的loss
+                if len(loss_history) == e:  # 确保本episode只添加一次loss
+                    loss_history.append(step_loss)
+                else:
+                    # 如果已有loss，则取平均
+                    loss_history[e] = (loss_history[e] + step_loss) / 2.0
+            
             state = next_state
             total_reward += reward
 
             if done:
                 break
 
-        # 更新策略
-        loss = agent.update()
+        # 如果这个episode还没记录loss，说明一直没有进行更新
+        if len(loss_history) <= e:
+            loss_history.append(0.0)
+            
         rewards_history.append(total_reward)
-        loss_history.append(loss)
 
         # 计算当前分区权重方差
         partition_weights = calculate_partition_weights(graph, env.partition_assignment, num_partitions)
