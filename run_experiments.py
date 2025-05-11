@@ -396,10 +396,9 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
     best_partition = None
     rewards_history = []
     loss_history = []
-    variance_history = []
-
-    # 训练循环
+    variance_history = []    # 训练循环
     progress_bar = tqdm(range(episodes), desc="训练GNN-PPO")
+    start_time = time.time()
     for e in progress_bar:
         state, _ = env.reset()
         total_reward = 0        

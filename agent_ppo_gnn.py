@@ -54,8 +54,7 @@ class GNNPPOPolicy(nn.Module):
 
         return action_probs, values
     
-    # 【优化5】添加批量动作选择功能
-    def act_batch(self, batch_data):
+    # 【优化5】添加批量动作选择功能    def act_batch(self, batch_data):
         """批量处理状态并返回动作，大幅减少CPU-GPU传输"""
         with torch.no_grad():
             action_probs, values = self.forward(batch_data)
@@ -65,12 +64,12 @@ class GNNPPOPolicy(nn.Module):
             actions = dist.sample()
             action_log_probs = dist.log_prob(actions)
             
+            # 返回动作、对数概率和价值估计 - 保持结构一致
             return actions.detach().cpu(), action_log_probs.detach().cpu(), values.detach().cpu()
-
     def act(self, data):
         """根据当前状态选择动作"""
         with torch.no_grad():  # 【优化6】确保使用torch.no_grad()减少内存占用
-            action_probs, _ = self.forward(data)
+            action_probs, node_values = self.forward(data)
             action_probs_flat = action_probs.view(-1)
 
             # 创建动作分布并采样
@@ -78,7 +77,7 @@ class GNNPPOPolicy(nn.Module):
             action = dist.sample()
             action_log_prob = dist.log_prob(action)
 
-            return action.item(), action_log_prob
+            return action.item(), action_log_prob, node_values
 
     def evaluate(self, data, action):
         """评估动作的价值和概率"""
@@ -176,6 +175,29 @@ class GNNPPOAgent:
             self.logger = None
 
         self.state_cache = {}  # 添加状态缓存
+
+        # 初始化缓存机制
+        self._init_caches()
+
+    def _init_caches(self):
+        """初始化缓存字典，用于存储前向传播结果"""
+        self.feature_cache = {}  # 存储GNN前向传播特征
+        self.max_cache_size = 1000  # 最大缓存大小
+        
+    def _clear_cache(self):
+        """清除特征缓存"""
+        self.feature_cache.clear()
+
+    def _check_feature_cache(self, state_hash):
+        """检查特征缓存，如果命中则返回缓存的特征，否则返回None"""
+        # 如果缓存太大，清除一半
+        if len(self.feature_cache) > self.max_cache_size:
+            # 简单策略：删除一半
+            keys_to_remove = list(self.feature_cache.keys())[:len(self.feature_cache)//2]
+            for key in keys_to_remove:
+                del self.feature_cache[key]
+                
+        return self.feature_cache.get(state_hash, None)
 
     def _build_graph_structure(self):
         """构建PyG的图数据结构"""
@@ -280,7 +302,6 @@ class GNNPPOAgent:
         )
         
         return batch_data
-    
     def collect_experiences_parallel(self, envs, num_steps=10):
         """并行从多个环境收集经验，减少CPU瓶颈"""
         num_envs = len(envs)
@@ -288,7 +309,7 @@ class GNNPPOAgent:
         # 重置所有环境
         states = [env.reset()[0] for env in envs]
         all_data = {
-            'states': [], 'actions': [], 'log_probs': [],
+            'states': [], 'actions': [], 'log_probs': [], 
             'rewards': [], 'dones': [], 'values': []
         }
         
@@ -296,19 +317,12 @@ class GNNPPOAgent:
         batch_data = self._states_to_batch_data_optimized(states)
         
         for _ in range(num_steps):
-            # 批量处理动作选择
-            with torch.no_grad():
-                action_probs, values = self.policy.forward(batch_data)
-                action_probs_flat = action_probs.view(-1)
-                
-                # 为每个节点采样动作
-                dist = Categorical(action_probs_flat)
-                actions = dist.sample()
-                log_probs = dist.log_prob(actions)
-                
-                # 重塑为每个环境的动作
-                actions = actions.view(num_envs, -1)
-                log_probs = log_probs.view(num_envs, -1)
+            # 批量处理动作选择 - 使用更高效的批量act方法
+            actions, log_probs, values = self.policy.act_batch(batch_data)
+            
+            # 重塑为每个环境的动作
+            actions = actions.view(num_envs, -1)
+            log_probs = log_probs.view(num_envs, -1)
             
             # 在所有环境中执行步骤
             next_states = []
@@ -420,7 +434,6 @@ class GNNPPOAgent:
             batch_data_list.append(data)
             
         return Batch.from_data_list(batch_data_list).to(self.device)
-    
     def act(self, state):
         """根据当前状态选择动作"""
         # 【优化17】使用计时器评估性能瓶颈
@@ -437,11 +450,10 @@ class GNNPPOAgent:
         action = 0 # 初始化 action
 
         with torch.no_grad():
-            action_tensor, log_prob_tensor = self.policy.act(state_data)
+            # 优化：只执行一次前向传播，同时获取动作和价值估计
+            action_tensor, log_prob_tensor, values_nodes = self.policy.act(state_data)
             action = action_tensor # .item() 已经在 policy.act 中处理
             log_prob = log_prob_tensor
-
-            _, values_nodes = self.policy(state_data) # policy forward 返回 probs, values
             value = values_nodes.mean().item()  # 使用所有节点值的平均作为状态价值
                 
         self.forward_time += time.time() - conversion_end
@@ -672,8 +684,7 @@ class GNNPPOAgent:
         advantages = np.array(advantages)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        return returns, advantages
-
+        return returns, advantages    
     def _clear_buffers(self):
         """清空轨迹缓冲区"""
         self.states = []
@@ -683,6 +694,9 @@ class GNNPPOAgent:
         self.rewards = []
         self.dones = []
         self.values = []
+        
+        # 清除特征缓存，避免内存占用过大
+        self._clear_cache()
 
     def save_model(self, filepath):
         """保存模型到文件"""
@@ -694,14 +708,16 @@ class GNNPPOAgent:
     
     # 【优化26】添加性能统计打印
     def print_performance_stats(self):
-        """打印性能统计信息"""
+        """打印性能统计"""
         total_time = self.conversion_time + self.forward_time + self.update_time
         if total_time > 0:
-            print(f"性能统计:")
-            print(f"  状态转换时间: {self.conversion_time:.2f}s ({self.conversion_time/total_time*100:.1f}%)")
-            print(f"  前向传播时间: {self.forward_time:.2f}s ({self.forward_time/total_time*100:.1f}%)")
-            print(f"  策略更新时间: {self.update_time:.2f}s ({self.update_time/total_time*100:.1f}%)")
-            print(f"  总时间: {total_time:.2f}s")
+            print("性能统计:")
+            print(f"状态转换时间: {self.conversion_time:.2f}s ({self.conversion_time/total_time*100:.1f}%)")
+            print(f"前向传播时间: {self.forward_time:.2f}s ({self.forward_time/total_time*100:.1f}%)")
+            print(f"策略更新时间: {self.update_time:.2f}s ({self.update_time/total_time*100:.1f}%)")
+            print(f"总时间: {total_time:.2f}s")
+        else:
+            print("还没有收集到性能统计数据")
     
     # 【优化27】添加评估模式方法
     def eval_mode(self):
