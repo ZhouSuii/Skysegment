@@ -743,10 +743,10 @@ def main():
 
     # 创建测试图
     graph = create_test_graph(num_nodes=10, seed=42)
-    num_partitions = 2
+    num_partitions = 3
 
     print("开始图划分实验...")
-    df = run_experiment("test_graph_10", graph, num_partitions, config)
+    df = run_experiment("test_graph_10_3parts", graph, num_partitions, config)
 
     print("\n实验完成！结果已保存到results目录")
     print(df)

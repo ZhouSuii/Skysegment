@@ -1,5 +1,5 @@
 {
-    "episodes": 3000,
+    "episodes": 2000,
     "max_steps": 100,
     "batch_size": 128,
     "methods": [
@@ -13,9 +13,9 @@
         "random"
     ],
     "potential_weights": {
-        "variance": 3.6263409698687026,
-        "edge_cut": 0.4461827081071835,
-        "modularity": 0.15661647836919
+        "variance": 2.9881060246804405,
+        "edge_cut": 1.2461495299855996,
+        "modularity": 1.3742663450187955
     },
     "dqn_config": {
         "learning_rate": 0.00034139312481129536,
@@ -66,15 +66,15 @@
         "hidden_dim": 256,
         "num_layers": 3,
         "dropout_rate": 0.29848044095633763,
-        "gamma": 0.976182738341991,
-        "gae_lambda": 0.9247552478110529,
-        "clip_ratio": 0.18730903333641763,
+        "gamma": 0.9905901148468622,
+        "gae_lambda": 0.9426784123902225,
+        "clip_ratio": 0.22877864369781284,
         "ppo_epochs": 9,
         "batch_size": 64,
-        "entropy_coef": 0.0033609139223597416,
-        "value_coef": 0.43197785729901544,
+        "value_coef": 0.4112372675844798,
+        "entropy_coef": 0.00015192970919454855,
         "update_frequency": 1709,
-        "adam_beta1": 0.8954180387606185,
+        "adam_beta1": 0.8847626307474279,
         "adam_beta2": 0.9911641600698771,
         "jit_compile": true,
         "use_cuda_streams": true

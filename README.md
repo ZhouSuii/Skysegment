@@ -107,8 +107,9 @@
 10. 待完成需求：
     - 25/4/30: 对五个tpo代码进行理解与注释，重新考虑数据的生成与处理方式  -- finished
     - 25/5/1: 重构四个agent的hpo代码支持新的reward函数      -- finished
-    - 25/5/1: 在gnn中实现usecudastreams 分析并优化前向传播占比时间过长的问题
-    - 25/5/11: 修正gnnppo训练时loss为0的问题，删除update_frequency并引入n_steps来进行更新
+    - 25/5/1: 在gnn中实现usecudastreams 分析并优化前向传播占比时间过长的问题  -- 改进前向传播一次搜集数据
+    - 25/5/11: 修正gnnppo训练时loss为0的问题，删除update_frequency并引入n_steps来进行更新  -- finished
+    - 25/5/11: 发现pbrs_edge_cut_weight 和 pbrs_modularity_weight 的重要性极低，可能需要修改reward -- 修改了tpo的objective value
 
 
 算法的实现与优化都感觉一个非常非常庞大的任务，很多时候都是在摸黑操作，像计算机一样的精密结构牵一发而动全身
