@@ -29,9 +29,9 @@ OPTUNA_DB_NAME = "optuna_pbrs_ppo_gnn_study.db" # 新数据库名
 OPTUNA_RESULTS_FILE = os.path.join(RESULTS_DIR, "optuna_pbrs_ppo_gnn_results.csv") # 新结果文件名
 OPTUNA_PLOTS_DIR = os.path.join(RESULTS_DIR, "optuna_pbrs_ppo_gnn_plots")
 REPORT_INTERVAL = 50 # 每隔多少回合报告一次中间目标值
-IMBALANCE_PENALTY = 0.1 # 不平衡惩罚系数
+IMBALANCE_PENALTY = 0.5 # 不平衡惩罚系数
 MODULARITY_WEIGHT = 1.0  # 调整这个权重以反映模块度的重要性
-EDGE_CUT_WEIGHT = 0.8  # 和normalized_cut同等重要
+EDGE_CUT_WEIGHT = 1.0  # 和normalized_cut同等重要
 
 # 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -53,16 +53,15 @@ def objective(trial: optuna.Trial):
     'value_coef': trial.suggest_float('value_coef', 0.4, 0.6),
     'entropy_coef': trial.suggest_float('entropy_coef', 1e-4, 0.05, log=True),
     'adam_beta1': trial.suggest_float('adam_beta1', 0.85, 0.95),
-    
+    'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True),
+    'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.5),
     # 固定不太重要的参数
-    'learning_rate': 0.0009,  # 使用最佳值
-    'hidden_dim': 384,        # 使用最佳值
+    'hidden_dim': 256,        # 使用最佳值
     'num_layers': 3,          # 使用最佳值
-    'dropout_rate': 0.44,     # 使用最佳值
     'ppo_epochs': 10,         # 使用最佳值
     'batch_size': 256,        
     'adam_beta2': 0.99,       # 使用最佳值
-    'update_frequency': 2048  # 降低更新频率，2817太大
+    'update_frequency': 2048
 }
 
     # 建议 PBRS 势能函数权重
@@ -184,10 +183,9 @@ def objective(trial: optuna.Trial):
         print(f"试验 {trial.number}: 最终评估结果 = {eval_results}")
 
         # 计算最终目标值
-        objective_value = (1 - EDGE_CUT_WEIGHT) * eval_results["normalized_cut"] + \
-                  EDGE_CUT_WEIGHT * eval_results["edge_cut"] / total_edges - \
-                  MODULARITY_WEIGHT * eval_results["modularity"] + \
-                  IMBALANCE_PENALTY * max(0, eval_results["weight_imbalance"] - 1)
+        objective_value = eval_results["normalized_cut"] - \
+                 MODULARITY_WEIGHT * eval_results["modularity"] + \
+                 IMBALANCE_PENALTY * max(0, eval_results["weight_imbalance"] - 1)
 
         print(f"试验 {trial.number}: 最终目标值 = {objective_value:.6f}")
 

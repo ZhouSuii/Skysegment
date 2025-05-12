@@ -73,7 +73,7 @@
         "batch_size": 64,
         "value_coef": 0.4112372675844798,
         "entropy_coef": 0.00015192970919454855,
-        "update_frequency": 1709,
+        "update_frequency": 2048,
         "adam_beta1": 0.8847626307474279,
         "adam_beta2": 0.9911641600698771,
         "jit_compile": true,

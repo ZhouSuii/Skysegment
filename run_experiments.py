@@ -692,7 +692,7 @@ def plot_comparison(graph_name, results, results_dir):
 def main():
     # 限制 PyTorch 和底层库使用的线程数，减少后台线程空闲等待
     # 建议设置为物理核心数，例如 4 或 8，根据您的服务器调整
-    num_threads = 4
+    num_threads = 8
     torch.set_num_threads(num_threads)
     os.environ['OMP_NUM_THREADS'] = str(num_threads)
     os.environ['MKL_NUM_THREADS'] = str(num_threads)
@@ -743,10 +743,10 @@ def main():
 
     # 创建测试图
     graph = create_test_graph(num_nodes=10, seed=42)
-    num_partitions = 3
+    num_partitions = 2
 
     print("开始图划分实验...")
-    df = run_experiment("test_graph_10_3parts", graph, num_partitions, config)
+    df = run_experiment("test_graph_10", graph, num_partitions, config)
 
     print("\n实验完成！结果已保存到results目录")
     print(df)
