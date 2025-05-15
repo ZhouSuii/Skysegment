@@ -1,7 +1,6 @@
 import optuna
 import json
 import torch
-# import networkx as nx # 不再直接使用
 import numpy as np
 from tqdm import tqdm
 import time
@@ -220,7 +219,7 @@ def objective(trial: optuna.Trial):
 
 # --- 主执行 ---
 if __name__ == "__main__":
-    study_name = "gnn-ppo-partitioning-optimization-v3" # 新名称
+    study_name = "gnn-ppo-partitioning-optimization" # 新名称
 
     # Pruner 设置 (类似 DQN)
     pruner = optuna.pruners.MedianPruner(

@@ -29,9 +29,9 @@ OPTUNA_DB_NAME = "optuna_pbrs_ppo_gnn_study.db" # 新数据库名
 OPTUNA_RESULTS_FILE = os.path.join(RESULTS_DIR, "optuna_pbrs_ppo_gnn_results.csv") # 新结果文件名
 OPTUNA_PLOTS_DIR = os.path.join(RESULTS_DIR, "optuna_pbrs_ppo_gnn_plots")
 REPORT_INTERVAL = 50 # 每隔多少回合报告一次中间目标值
-IMBALANCE_PENALTY = 0.5 # 不平衡惩罚系数
-MODULARITY_WEIGHT = 1.0  # 调整这个权重以反映模块度的重要性
-EDGE_CUT_WEIGHT = 1.0  # 和normalized_cut同等重要
+# 以下权重将改为由Optuna调优，不再使用全局固定值
+# IMBALANCE_PENALTY = 0.5 # 不平衡惩罚系数
+# MODULARITY_WEIGHT = 1.0  # 调整这个权重以反映模块度的重要性
 
 # 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -70,7 +70,14 @@ def objective(trial: optuna.Trial):
     'edge_cut': trial.suggest_float('pbrs_edge_cut_weight', 0.5, 5.0, log=True),  # 提高下限
     'modularity': trial.suggest_float('pbrs_modularity_weight', 0.5, 5.0, log=True)  # 提高下限
 }
+
+    # 建议目标函数权重作为超参数
+    obj_ncut_weight = trial.suggest_float('obj_ncut_weight', 0.1, 2.0, log=True)  # 归一化切边权重
+    obj_modularity_weight = trial.suggest_float('obj_modularity_weight', 0.1, 2.0, log=True)  # 模块度权重
+    obj_imbalance_penalty = trial.suggest_float('obj_imbalance_penalty', 0.1, 2.0, log=True)  # 不平衡惩罚系数
+    
     print(f"试验 {trial.number}: 配置 = {config}, PBRS 权重 = {potential_weights}")
+    print(f"试验 {trial.number}: 目标函数权重: 归一化切边={obj_ncut_weight:.3f}, 模块度={obj_modularity_weight:.3f}, 不平衡惩罚={obj_imbalance_penalty:.3f}")
 
     agent = None
     env = None
@@ -151,7 +158,10 @@ def objective(trial: optuna.Trial):
                 current_partition = env.partition_assignment
                 if current_partition is not None and len(np.unique(current_partition)) == NUM_PARTITIONS:
                     eval_results_intermediate = evaluate_partition(graph, current_partition, NUM_PARTITIONS, print_results=False)
-                    intermediate_objective = eval_results_intermediate["normalized_cut"] + IMBALANCE_PENALTY * max(0, eval_results_intermediate["weight_imbalance"] - 1)
+                    # 使用动态权重计算中间目标值
+                    intermediate_objective = (obj_ncut_weight * eval_results_intermediate["normalized_cut"] - 
+                                             obj_modularity_weight * eval_results_intermediate["modularity"] + 
+                                             obj_imbalance_penalty * max(0, eval_results_intermediate["weight_imbalance"] - 1))
 
                     trial.report(intermediate_objective, e) # 报告目标值
 
@@ -182,10 +192,10 @@ def objective(trial: optuna.Trial):
         eval_results = evaluate_partition(graph, final_partition, NUM_PARTITIONS, print_results=False)
         print(f"试验 {trial.number}: 最终评估结果 = {eval_results}")
 
-        # 计算最终目标值
-        objective_value = eval_results["normalized_cut"] - \
-                 MODULARITY_WEIGHT * eval_results["modularity"] + \
-                 IMBALANCE_PENALTY * max(0, eval_results["weight_imbalance"] - 1)
+        # 计算最终目标值 - 使用Optuna建议的权重而非全局常量
+        objective_value = (obj_ncut_weight * eval_results["normalized_cut"] -
+                           obj_modularity_weight * eval_results["modularity"] +
+                           obj_imbalance_penalty * max(0, eval_results["weight_imbalance"] - 1))
 
         print(f"试验 {trial.number}: 最终目标值 = {objective_value:.6f}")
 

@@ -572,9 +572,10 @@ def plot_training_curves(graph_name, training_data, results_dir):
     plt.title(f"训练奖励曲线 - {graph_name}")
     plt.xlabel("Episodes")
     plt.ylabel("Total Reward")
-    plt.legend()
+    plt.legend()    
     plt.grid(True)
     plt.savefig(f"{results_dir}/plots/{graph_name}_rewards_comparison.png")
+    plt.savefig(f"{results_dir}/plots/{graph_name}_rewards_comparison.svg", format='svg')
     plt.close()
 
     # 绘制损失曲线
@@ -589,9 +590,10 @@ def plot_training_curves(graph_name, training_data, results_dir):
     plt.title(f"训练损失曲线 - {graph_name}")
     plt.xlabel("Episodes")
     plt.ylabel("Loss")
-    plt.legend()
+    plt.legend()    
     plt.grid(True)
     plt.savefig(f"{results_dir}/plots/{graph_name}_loss_comparison.png")
+    plt.savefig(f"{results_dir}/plots/{graph_name}_loss_comparison.svg", format='svg')
     plt.close()
 
     # 绘制方差曲线
@@ -606,9 +608,10 @@ def plot_training_curves(graph_name, training_data, results_dir):
     plt.title(f"分区权重方差曲线 - {graph_name}")
     plt.xlabel("Episodes")
     plt.ylabel("Weight Variance")
-    plt.legend()
+    plt.legend()    
     plt.grid(True)
     plt.savefig(f"{results_dir}/plots/{graph_name}_variance_comparison.png")
+    plt.savefig(f"{results_dir}/plots/{graph_name}_variance_comparison.svg", format='svg')
     plt.close()
 
     # 绘制带有标准差阴影的平均曲线
@@ -650,9 +653,10 @@ def plot_avg_curves_with_std(graph_name, training_data, results_dir):
         plt.title(f"平均{data_type.capitalize()}曲线 (带标准差) - {graph_name}")
         plt.xlabel("Episodes")
         plt.ylabel(data_type.capitalize())
-        plt.legend()
+        plt.legend()        
         plt.grid(True)
         plt.savefig(f"{results_dir}/plots/{graph_name}_avg_{data_type}.png")
+        plt.savefig(f"{results_dir}/plots/{graph_name}_avg_{data_type}.svg", format='svg')
         plt.close()
 
 
@@ -681,11 +685,11 @@ def plot_comparison(graph_name, results, results_dir):
     # 执行时间
     axs[2].bar(methods, execution_time)
     axs[2].set_title("Execution Time")
-    axs[2].set_ylabel("Seconds")
-
+    axs[2].set_ylabel("Seconds")    
     plt.suptitle(f"Algorithm Comparison - {graph_name}")
     plt.tight_layout()
     plt.savefig(f"{results_dir}/plots/{graph_name}_comparison.png")
+    plt.savefig(f"{results_dir}/plots/{graph_name}_comparison.svg", format='svg')
     plt.close()
 
 
@@ -742,7 +746,7 @@ def main():
     config = load_config("configs/default.json")
 
     # 创建测试图
-    graph = create_test_graph(num_nodes=10, seed=42)
+    graph = create_test_graph(num_nodes=20, seed=42)
     num_partitions = 2
 
     print("开始图划分实验...")

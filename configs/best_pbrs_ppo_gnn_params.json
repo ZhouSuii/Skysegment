@@ -1,11 +1,16 @@
 {
-    "gamma": 0.9905901148468622,
-    "gae_lambda": 0.9426784123902225,
-    "clip_ratio": 0.22877864369781284,
-    "value_coef": 0.4112372675844798,
-    "entropy_coef": 0.00015192970919454855,
-    "adam_beta1": 0.8847626307474279,
-    "pbrs_variance_weight": 2.9881060246804405,
-    "pbrs_edge_cut_weight": 1.2461495299855996,
-    "pbrs_modularity_weight": 1.3742663450187955
+    "gamma": 0.9711338445574319,
+    "gae_lambda": 0.9135797274584113,
+    "clip_ratio": 0.10087277392472359,
+    "value_coef": 0.5755630830795541,
+    "entropy_coef": 0.00012224831333416792,
+    "adam_beta1": 0.8552192407215792,
+    "learning_rate": 0.00011621660873568751,
+    "dropout_rate": 0.1381138991091122,
+    "pbrs_variance_weight": 0.37383366585887906,
+    "pbrs_edge_cut_weight": 0.5601435310421575,
+    "pbrs_modularity_weight": 4.997480793624385,
+    "obj_ncut_weight": 0.13527477523570355,
+    "obj_modularity_weight": 1.9535664372233543,
+    "obj_imbalance_penalty": 0.10005928936317056
 }
