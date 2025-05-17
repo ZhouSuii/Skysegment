@@ -11,31 +11,26 @@ import time  # 添加 time 模块用于性能分析
 
 
 # GNN-PPO策略网络
-class GNNPPOPolicy(nn.Module):
+class GNNPPOPolicy(nn.Module):    
     def __init__(self, node_features, hidden_dim, output_dim, num_partitions):
         super(GNNPPOPolicy, self).__init__()
         self.num_partitions = num_partitions
 
-        # 增加 GNN 层数和宽度，提高 GPU 利用率
+        # 简化为两层GNN，减少过平滑问题
         self.conv1 = GCNConv(node_features, hidden_dim)
         self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.conv3 = GCNConv(hidden_dim, hidden_dim)  # 新增第三层
         
-        # 扩大 Actor 网络宽度
+        # 简化Actor网络，移除多余的扩展-收缩结构
         self.actor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim*2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim*2, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),  # 维持一致的宽度
             nn.ReLU(),
             nn.Linear(hidden_dim, output_dim),
             nn.Softmax(dim=-1)
         )
-
-        # 扩大 Critic 网络宽度
+        
+        # 简化Critic网络，减少参数量
         self.critic = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim*2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim*2, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),  # 维持一致的宽度
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
@@ -43,10 +38,9 @@ class GNNPPOPolicy(nn.Module):
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
 
-        # 增加更多计算层
-        x = F.relu(self.conv1(x, edge_index))
-        x = F.relu(self.conv2(x, edge_index))
-        x = F.relu(self.conv3(x, edge_index))
+        # 使用两层GNN并添加残差连接，减少过平滑问题
+        x1 = F.relu(self.conv1(x, edge_index))  # 第一层输出
+        x = F.relu(self.conv2(x1, edge_index)) + x1  # 第二层 + 残差连接
 
         # 对每个节点输出动作概率和状态价值
         action_probs = self.actor(x)
@@ -464,8 +458,7 @@ class GNNPPOAgent:
         self.log_probs.append(log_prob)
         self.values.append(value)
         
-        return action, log_prob, value
-
+        return action, log_prob, value    
     def store_transition(self, reward, done):
         """存储奖励和状态终止信号"""
         self.rewards.append(reward)
@@ -475,13 +468,12 @@ class GNNPPOAgent:
         """检查是否达到了更新频率"""
         # 确保缓冲区中有足够的数据
         return len(self.rewards) >= self.n_steps
-
+        
     @torch.jit.script_if_tracing
     def _forward_jit(self, x, edge_index):
-        """JIT加速的前向计算"""
-        x = F.relu(self.conv1(x, edge_index))
-        x = F.relu(self.conv2(x, edge_index))
-        x = F.relu(self.conv3(x, edge_index))
+        """JIT加速的前向计算，包含残差连接"""
+        x1 = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x1, edge_index)) + x1  # 添加残差连接
         return x
 
     def update(self):
@@ -493,10 +485,8 @@ class GNNPPOAgent:
         start = time.time()
 
         if len(self.rewards) == 0:
-            return 0.0
-
-        # 计算回报和优势 (在GPU上)
-        returns_t, advantages_t = self._compute_returns_advantages_vectorized()
+            return 0.0        # 计算回报和优势 (在GPU上)
+        returns_t, advantages_t, values_t = self._compute_returns_advantages_vectorized()
 
         # 使用异步处理批量转换状态
         state_processing_start = time.time()
@@ -572,10 +562,17 @@ class GNNPPOAgent:
                 # 向量化的clip操作
                 surr1 = ratio * batch_advantages
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * batch_advantages
-                policy_loss = -torch.min(surr1, surr2).mean()
-
-                # 计算价值损失
-                value_loss = F.mse_loss(values, batch_returns)
+                policy_loss = -torch.min(surr1, surr2).mean()                # 获取旧的值估计
+                batch_old_values = values_t[batch_indices]
+                
+                # 实现值函数裁剪，防止值函数更新过大导致训练不稳定
+                value_pred_clipped = batch_old_values + torch.clamp(
+                    values - batch_old_values, -self.clip_ratio, self.clip_ratio
+                )
+                # 计算两种值损失并取最大值，类似于PPO策略裁剪
+                value_losses = (values - batch_returns).pow(2)
+                value_losses_clipped = (value_pred_clipped - batch_returns).pow(2)
+                value_loss = 0.5 * torch.max(value_losses, value_losses_clipped).mean()
 
                 # 总损失
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy.mean()
@@ -611,8 +608,7 @@ class GNNPPOAgent:
         
         return total_loss / max(1, update_rounds)
 
-    
-    # 添加向量化的GAE计算
+      # 添加向量化的GAE计算
     def _compute_returns_advantages_vectorized(self):
         """真正向量化的GAE计算, 无Python循环"""
         # 将数据转换为 GPU 张量
@@ -633,11 +629,11 @@ class GNNPPOAgent:
                 next_value_t = last_values.mean().item()  # 使用平均值作为状态值
         
         # 添加下一个状态值到values序列末尾 - 确保维度匹配
-        values_t = torch.cat([values_t, torch.tensor([next_value_t], device=self.device)])
+        values_extended = torch.cat([values_t, torch.tensor([next_value_t], device=self.device)])
         
         # 计算delta和GAE
         masks = 1.0 - dones_t
-        deltas = rewards_t + self.gamma * values_t[1:] * masks - values_t[:-1]
+        deltas = rewards_t + self.gamma * values_extended[1:] * masks - values_t
         
         # 计算优势（倒序）
         advantages_t = torch.zeros_like(rewards_t)
@@ -647,14 +643,19 @@ class GNNPPOAgent:
             advantages_t[t] = gae
         
         # 计算回报
-        returns_t = advantages_t + values_t[:-1]
+        returns_t = advantages_t + values_t
         
-        # 标准化优势 (在 GPU 上)
+        # 标准化优势，提高训练稳定性
+        advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std() + 1e-8)
+        
+        # 返回回报、优势和当前状态的值估计
+        return returns_t, advantages_t, values_t
+          # 标准化优势 (在 GPU 上)
         if len(advantages_t) > 1:
             advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std() + 1e-8)
         
-        return returns_t, advantages_t
-
+        return returns_t, advantages_t, values_t
+        
     def _compute_returns_advantages(self):
         """计算广义优势估计(GAE)和回报"""
         returns = []
@@ -670,6 +671,7 @@ class GNNPPOAgent:
                 _, values = self.policy(next_state_data)
                 next_value = values.mean().item()
 
+        values_copy = self.values.copy()  # 创建副本以存储原始值函数估计
         self.values.append(next_value)
 
         # 倒序计算GAE
@@ -684,7 +686,15 @@ class GNNPPOAgent:
         advantages = np.array(advantages)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        return returns, advantages    
+        # 还原values列表，移除next_value
+        self.values = values_copy
+
+        # 转换为torch张量
+        returns_t = torch.tensor(returns, dtype=torch.float32, device=self.device)
+        advantages_t = torch.tensor(advantages, dtype=torch.float32, device=self.device)
+        values_t = torch.tensor(values_copy, dtype=torch.float32, device=self.device)
+
+        return returns_t, advantages_t, values_t
     def _clear_buffers(self):
         """清空轨迹缓冲区"""
         self.states = []

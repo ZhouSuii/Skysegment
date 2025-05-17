@@ -24,9 +24,9 @@ MAX_STEPS_PER_EPISODE = 50
 OPTUNA_TIMEOUT = 3600 * 6 # 增加超时时间 (例如, 6小时)
 RESULTS_DIR = "results"
 CONFIGS_DIR = "configs"
-BEST_PARAMS_FILE = os.path.join(CONFIGS_DIR, "best_pbrs_ppo_gnn_params.json") # 新文件名
-OPTUNA_DB_NAME = "optuna_pbrs_ppo_gnn_study.db" # 新数据库名
-OPTUNA_RESULTS_FILE = os.path.join(RESULTS_DIR, "optuna_pbrs_ppo_gnn_results.csv") # 新结果文件名
+BEST_PARAMS_FILE = os.path.join(CONFIGS_DIR, "best_pbrs_ppo_gnn_params.json") # 文件名
+OPTUNA_DB_NAME = "optuna_pbrs_ppo_gnn_study.db" # 数据库
+OPTUNA_RESULTS_FILE = os.path.join(RESULTS_DIR, "optuna_pbrs_ppo_gnn_results.csv") # 结果文件名
 OPTUNA_PLOTS_DIR = os.path.join(RESULTS_DIR, "optuna_pbrs_ppo_gnn_plots")
 REPORT_INTERVAL = 50 # 每隔多少回合报告一次中间目标值
 # 以下权重将改为由Optuna调优，不再使用全局固定值
@@ -55,13 +55,13 @@ def objective(trial: optuna.Trial):
     'adam_beta1': trial.suggest_float('adam_beta1', 0.85, 0.95),
     'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True),
     'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.5),
-    # 固定不太重要的参数
-    'hidden_dim': 256,        # 使用最佳值
-    'num_layers': 3,          # 使用最佳值
-    'ppo_epochs': 10,         # 使用最佳值
-    'batch_size': 256,        
-    'adam_beta2': 0.99,       # 使用最佳值
-    'update_frequency': 2048
+    # 适配简化的网络结构
+    'hidden_dim': trial.suggest_int('hidden_dim', 64, 256),  # 允许调整隐藏层大小
+    'num_layers': 2,          # 固定为2层GNN (我们已经简化网络结构)
+    'ppo_epochs': trial.suggest_int('ppo_epochs', 4, 10),  # 更新次数也值得调优
+    'batch_size': trial.suggest_int('batch_size', 64, 256, log=True),  # 批量大小也很重要
+    'adam_beta2': 0.99,       # 保持固定
+    'update_frequency': trial.suggest_int('update_frequency', 512, 2048, log=True)  # 更新频率也很关键
 }
 
     # 建议 PBRS 势能函数权重

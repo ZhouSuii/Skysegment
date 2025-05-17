@@ -21,9 +21,7 @@ try:
 except Exception as e:
     print(f"字体配置错误: {e}，将使用默认字体")
 
-# --- 修改：导入 new_environment ---
 from new_environment import GraphPartitionEnvironment
-# --- 修改结束 ---
 from agent_dqn_basic import DQNAgent
 from metrics import evaluate_partition
 from baselines import random_partition, weighted_greedy_partition, metis_partition, spectral_partition
@@ -568,8 +566,7 @@ def plot_training_curves(graph_name, training_data, results_dir):
         window_size = min(10, len(rewards) // 10) if len(rewards) > 10 else 1
         smoothed_rewards = np.convolve(rewards, np.ones(window_size) / window_size, mode='valid')
         plt.plot(smoothed_rewards, label=method.upper())
-
-    plt.title(f"训练奖励曲线 - {graph_name}")
+    plt.title(f"Training Reward Curve - {graph_name}")
     plt.xlabel("Episodes")
     plt.ylabel("Total Reward")
     plt.legend()    
@@ -586,8 +583,7 @@ def plot_training_curves(graph_name, training_data, results_dir):
         window_size = min(10, len(loss) // 10) if len(loss) > 10 else 1
         smoothed_loss = np.convolve(loss, np.ones(window_size) / window_size, mode='valid')
         plt.plot(smoothed_loss, label=method.upper())
-
-    plt.title(f"训练损失曲线 - {graph_name}")
+    plt.title(f"Training Loss Curve - {graph_name}")
     plt.xlabel("Episodes")
     plt.ylabel("Loss")
     plt.legend()    
@@ -604,8 +600,7 @@ def plot_training_curves(graph_name, training_data, results_dir):
         window_size = min(10, len(variance) // 10) if len(variance) > 10 else 1
         smoothed_variance = np.convolve(variance, np.ones(window_size) / window_size, mode='valid')
         plt.plot(smoothed_variance, label=method.upper())
-
-    plt.title(f"分区权重方差曲线 - {graph_name}")
+    plt.title(f"Partition Weight Variance Curve - {graph_name}")
     plt.xlabel("Episodes")
     plt.ylabel("Weight Variance")
     plt.legend()    
@@ -650,7 +645,13 @@ def plot_avg_curves_with_std(graph_name, training_data, results_dir):
                 # 数据太少，直接绘制
                 plt.plot(data, label=method.upper())
 
-        plt.title(f"平均{data_type.capitalize()}曲线 (带标准差) - {graph_name}")
+        # 为不同数据类型设置适当的英文标题
+        title_mapping = {
+            "rewards": "Average Rewards",
+            "loss": "Average Loss",
+            "variance": "Average Weight Variance"
+        }
+        plt.title(f"{title_mapping.get(data_type, data_type.capitalize())} Curve (with Std Dev) - {graph_name}")
         plt.xlabel("Episodes")
         plt.ylabel(data_type.capitalize())
         plt.legend()        
@@ -746,7 +747,7 @@ def main():
     config = load_config("configs/default.json")
 
     # 创建测试图
-    graph = create_test_graph(num_nodes=20, seed=42)
+    graph = create_test_graph(num_nodes=10, seed=42)
     num_partitions = 2
 
     print("开始图划分实验...")
