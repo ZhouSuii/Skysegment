@@ -34,6 +34,21 @@ class GNNPPOPolicy(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
+        
+        # 添加用于健康检查的嵌入跟踪
+        self.embedding_stats_history = {
+            'layer1_mean': [], 'layer1_std': [], 'layer1_norm': [],
+            'layer2_mean': [], 'layer2_std': [], 'layer2_norm': [],
+            'actor_mean': [], 'actor_std': [], 'actor_norm': [],
+            'critic_mean': [], 'critic_std': [], 'critic_norm': []
+        }
+        self.grad_stats_history = {
+            'conv1_grad_norm': [], 'conv2_grad_norm': [],
+            'actor_grad_norm': [], 'critic_grad_norm': []
+        }
+        # 钩子函数，用于跟踪梯度
+        self.hooks = []
+        self.collect_stats = False
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
@@ -46,9 +61,141 @@ class GNNPPOPolicy(nn.Module):
         action_probs = self.actor(x)
         values = self.critic(x)
 
+        # 如果开启了统计收集，记录各层的嵌入统计信息
+        if self.collect_stats:
+            self._collect_embedding_stats(x1, x, action_probs, values)
+
         return action_probs, values
     
-    # 【优化5】添加批量动作选择功能    def act_batch(self, batch_data):
+    def _collect_embedding_stats(self, layer1_out, layer2_out, actor_out, critic_out):
+        """收集各层嵌入的统计信息"""
+        with torch.no_grad():
+            # 收集第一层GNN输出统计信息
+            self.embedding_stats_history['layer1_mean'].append(layer1_out.mean().item())
+            self.embedding_stats_history['layer1_std'].append(layer1_out.std().item())
+            self.embedding_stats_history['layer1_norm'].append(layer1_out.norm().item())
+            
+            # 收集第二层GNN输出统计信息
+            self.embedding_stats_history['layer2_mean'].append(layer2_out.mean().item())
+            self.embedding_stats_history['layer2_std'].append(layer2_out.std().item())
+            self.embedding_stats_history['layer2_norm'].append(layer2_out.norm().item())
+            
+            # 收集Actor网络输出统计信息
+            self.embedding_stats_history['actor_mean'].append(actor_out.mean().item())
+            self.embedding_stats_history['actor_std'].append(actor_out.std().item())
+            self.embedding_stats_history['actor_norm'].append(actor_out.norm().item())
+            
+            # 收集Critic网络输出统计信息
+            self.embedding_stats_history['critic_mean'].append(critic_out.mean().item())
+            self.embedding_stats_history['critic_std'].append(critic_out.std().item())
+            self.embedding_stats_history['critic_norm'].append(critic_out.norm().item())
+    
+    def setup_grad_hooks(self):
+        """设置梯度钩子，用于监控梯度流"""
+        if not self.hooks:  # 避免重复设置钩子
+            # 为GCN层设置钩子
+            self.hooks.append(self.conv1.register_full_backward_hook(self._grad_hook('conv1')))
+            self.hooks.append(self.conv2.register_full_backward_hook(self._grad_hook('conv2')))
+            
+            # 为Actor和Critic设置钩子
+            for i, layer in enumerate(self.actor):
+                if hasattr(layer, 'weight'):
+                    self.hooks.append(layer.register_full_backward_hook(self._grad_hook(f'actor_{i}')))
+            
+            for i, layer in enumerate(self.critic):
+                if hasattr(layer, 'weight'):
+                    self.hooks.append(layer.register_full_backward_hook(self._grad_hook(f'critic_{i}')))
+    
+    def _grad_hook(self, name):
+        """创建用于记录梯度的钩子函数"""
+        def hook(module, grad_input, grad_output):
+            if self.collect_stats and grad_output[0] is not None:
+                # 记录梯度范数
+                norm = grad_output[0].norm().item()
+                key = f'{name}_grad_norm'
+                if key in self.grad_stats_history:
+                    self.grad_stats_history[key].append(norm)
+                else:
+                    self.grad_stats_history[key] = [norm]
+        return hook
+    
+    def remove_hooks(self):
+        """移除所有梯度钩子"""
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks = []
+    
+    def print_embedding_stats(self, episode):
+        """打印嵌入统计信息"""
+        if not self.embedding_stats_history['layer1_mean']:  # 检查是否有数据
+            return
+            
+        # 获取最新的统计数据
+        stats = {}
+        for key, value_list in self.embedding_stats_history.items():
+            if value_list:  # 确保列表非空
+                stats[key] = value_list[-1]
+        
+        print(f"\n[Episode {episode}] GNN Embedding Health Check:")
+        print("Layer 1 GCN: Mean={:.4f}, Std={:.4f}, Norm={:.4f}".format(
+            stats.get('layer1_mean', 0), stats.get('layer1_std', 0), stats.get('layer1_norm', 0)))
+        print("Layer 2 GCN: Mean={:.4f}, Std={:.4f}, Norm={:.4f}".format(
+            stats.get('layer2_mean', 0), stats.get('layer2_std', 0), stats.get('layer2_norm', 0)))
+        print("Actor Output: Mean={:.4f}, Std={:.4f}, Norm={:.4f}".format(
+            stats.get('actor_mean', 0), stats.get('actor_std', 0), stats.get('actor_norm', 0)))
+        print("Critic Output: Mean={:.4f}, Std={:.4f}, Norm={:.4f}".format(
+            stats.get('critic_mean', 0), stats.get('critic_std', 0), stats.get('critic_norm', 0)))
+        
+        # 如果有梯度统计信息，也打印出来
+        if self.grad_stats_history.get('conv1_grad_norm'):
+            print("\nGradient Norms:")
+            for key, values in self.grad_stats_history.items():
+                if values:  # 确保列表非空
+                    print(f"{key}: {values[-1]:.4f}")
+    
+    def visualize_embeddings(self, data, episode, output_dir="results/embeddings"):
+        """可视化节点嵌入"""
+        import os
+        import matplotlib.pyplot as plt
+        from sklearn.decomposition import PCA
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        with torch.no_grad():
+            x, edge_index = data.x, data.edge_index
+            
+            # 获取两层的嵌入
+            x1 = F.relu(self.conv1(x, edge_index))
+            x2 = F.relu(self.conv2(x1, edge_index)) + x1
+            
+            # 将嵌入转移到CPU并转换为numpy数组
+            x1_np = x1.cpu().numpy()
+            x2_np = x2.cpu().numpy()
+            
+            # 使用PCA将嵌入降维到2维以便可视化
+            pca = PCA(n_components=2)
+            
+            if len(x1_np) > 1:  # 确保有足够的样本进行PCA
+                x1_2d = pca.fit_transform(x1_np)
+                
+                # 可视化第一层嵌入
+                plt.figure(figsize=(10, 8))
+                plt.scatter(x1_2d[:, 0], x1_2d[:, 1], c=range(len(x1_2d)), cmap='viridis')
+                plt.colorbar(label='Node Index')
+                plt.title(f'Layer 1 Embedding Visualization - Episode {episode}')
+                plt.savefig(f"{output_dir}/layer1_ep{episode}.png")
+                plt.close()
+                
+                # 可视化第二层嵌入
+                x2_2d = pca.fit_transform(x2_np)
+                plt.figure(figsize=(10, 8))
+                plt.scatter(x2_2d[:, 0], x2_2d[:, 1], c=range(len(x2_2d)), cmap='viridis')
+                plt.colorbar(label='Node Index')
+                plt.title(f'Layer 2 Embedding Visualization - Episode {episode}')
+                plt.savefig(f"{output_dir}/layer2_ep{episode}.png")
+                plt.close()
+
+    def act_batch(self, batch_data):
         """批量处理状态并返回动作，大幅减少CPU-GPU传输"""
         with torch.no_grad():
             action_probs, values = self.forward(batch_data)
@@ -60,6 +207,7 @@ class GNNPPOPolicy(nn.Module):
             
             # 返回动作、对数概率和价值估计 - 保持结构一致
             return actions.detach().cpu(), action_log_probs.detach().cpu(), values.detach().cpu()
+
     def act(self, data):
         """根据当前状态选择动作"""
         with torch.no_grad():  # 【优化6】确保使用torch.no_grad()减少内存占用
@@ -113,7 +261,6 @@ class GNNPPOAgent:
         self.adam_beta2 = config.get('adam_beta2', 0.999)
         # 修改：将update_frequency更名为n_steps，并设置更合理的默认值
         self.n_steps = config.get('n_steps', config.get('update_frequency', 128))
-        # 移除update_counter，我们直接使用buffer大小判断
         
         # 增加新的GPU优化配置
         self.hidden_dim = config.get('hidden_dim', 256)  # 增加默认隐藏层维度
@@ -172,6 +319,27 @@ class GNNPPOAgent:
 
         # 初始化缓存机制
         self._init_caches()
+
+        # 添加健康检查配置
+        self.enable_health_check = config.get('enable_health_check', False)
+        self.health_check_freq = config.get('health_check_freq', 10)  # 每10个episode进行一次健康检查
+        self.enable_grad_check = config.get('enable_grad_check', False)
+        self.enable_embedding_vis = config.get('enable_embedding_vis', False)
+        self.vis_freq = config.get('vis_freq', 50)  # 每50个episode可视化一次嵌入
+        
+        # 健康检查控制标记
+        self.health_check_states = {
+            'episode_start': False,  # 是否已在当前episode开始时打印
+            'episode_end': False,    # 是否已在当前episode结束时打印
+            'after_update': False,   # 是否已在当前更新后打印
+        }
+        
+        # 如果开启了梯度检查，设置钩子
+        if self.enable_grad_check:
+            self.policy.setup_grad_hooks()
+            
+        # 当前episode计数器
+        self.current_episode = 0
 
     def _init_caches(self):
         """初始化缓存字典，用于存储前向传播结果"""
@@ -428,6 +596,7 @@ class GNNPPOAgent:
             batch_data_list.append(data)
             
         return Batch.from_data_list(batch_data_list).to(self.device)
+        
     def act(self, state):
         """根据当前状态选择动作"""
         # 【优化17】使用计时器评估性能瓶颈
@@ -441,16 +610,16 @@ class GNNPPOAgent:
 
         value = 0.0 # 初始化 value
         log_prob = None # 初始化 log_prob
-        action = 0 # 初始化 action
-
+        action = 0 # 初始化 action        # 在episode开始时执行健康检查
+        self.perform_health_check(state_data, 'episode_start')
+            
         with torch.no_grad():
             # 优化：只执行一次前向传播，同时获取动作和价值估计
             action_tensor, log_prob_tensor, values_nodes = self.policy.act(state_data)
             action = action_tensor # .item() 已经在 policy.act 中处理
             log_prob = log_prob_tensor
             value = values_nodes.mean().item()  # 使用所有节点值的平均作为状态价值
-                
-        self.forward_time += time.time() - conversion_end
+            self.forward_time += time.time() - conversion_end
 
         # 存储当前轨迹信息 - 注意我们现在存储原始状态，不预先转换
         self.states.append(state)  # 存储原始NumPy状态
@@ -458,7 +627,7 @@ class GNNPPOAgent:
         self.log_probs.append(log_prob)
         self.values.append(value)
         
-        return action, log_prob, value    
+        return action, log_prob, value
     def store_transition(self, reward, done):
         """存储奖励和状态终止信号"""
         self.rewards.append(reward)
@@ -469,13 +638,12 @@ class GNNPPOAgent:
         # 确保缓冲区中有足够的数据
         return len(self.rewards) >= self.n_steps
         
-    @torch.jit.script_if_tracing
     def _forward_jit(self, x, edge_index):
         """JIT加速的前向计算，包含残差连接"""
         x1 = F.relu(self.conv1(x, edge_index))
         x = F.relu(self.conv2(x1, edge_index)) + x1  # 添加残差连接
         return x
-
+        
     def update(self):
         """优化的PPO算法更新，使用subgraph简化子图构建和向量化操作减少同步点"""
         # 如果数据不足，直接返回
@@ -485,7 +653,9 @@ class GNNPPOAgent:
         start = time.time()
 
         if len(self.rewards) == 0:
-            return 0.0        # 计算回报和优势 (在GPU上)
+            return 0.0
+            
+        # 计算回报和优势 (在GPU上)
         returns_t, advantages_t, values_t = self._compute_returns_advantages_vectorized()
 
         # 使用异步处理批量转换状态
@@ -503,6 +673,10 @@ class GNNPPOAgent:
         update_rounds = 0
         dataset_size = len(self.states)
         effective_batch_size = min(self.batch_size, dataset_size)
+
+        # 如果开启了梯度检查，启用收集统计
+        if self.enable_grad_check and self.current_episode % self.health_check_freq == 0:
+            self.policy.collect_stats = True
 
         # PPO更新循环
         for _ in range(self.ppo_epochs):
@@ -562,7 +736,9 @@ class GNNPPOAgent:
                 # 向量化的clip操作
                 surr1 = ratio * batch_advantages
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * batch_advantages
-                policy_loss = -torch.min(surr1, surr2).mean()                # 获取旧的值估计
+                policy_loss = -torch.min(surr1, surr2).mean()
+                
+                # 获取旧的值估计
                 batch_old_values = values_t[batch_indices]
                 
                 # 实现值函数裁剪，防止值函数更新过大导致训练不稳定
@@ -581,6 +757,26 @@ class GNNPPOAgent:
                 self.optimizer.zero_grad(set_to_none=True)  # 使用set_to_none=True减少内存使用
                 loss.backward()
                 
+                # 检查是否有梯度异常 (NaN或Inf)
+                if self.enable_health_check and self.current_episode % self.health_check_freq == 0:
+                    has_nan_grad = False
+                    max_grad_norm = 0.0
+                    for name, param in self.policy.named_parameters():
+                        if param.grad is not None:
+                            grad_norm = param.grad.norm().item()
+                            max_grad_norm = max(max_grad_norm, grad_norm)
+                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                print(f"[Warning] NaN/Inf gradient detected in {name}")
+                                has_nan_grad = True
+                    
+                    if has_nan_grad:
+                        print("[Warning] NaN/Inf gradients found, skipping this update")
+                        self.optimizer.zero_grad()
+                        continue
+                    
+                    if max_grad_norm > 10.0:  # 通常认为梯度范数超过10是很大的
+                        print(f"[Warning] Large gradient norm: {max_grad_norm:.4f}")
+                
                 # 使用原地操作进行梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
                 self.optimizer.step()
@@ -597,6 +793,21 @@ class GNNPPOAgent:
                         value_loss.item(),
                         policy_loss.item()
                     )
+                    
+                    # 额外记录嵌入统计信息到TensorBoard
+                    if self.enable_health_check and self.current_episode % self.health_check_freq == 0:
+                        for key, value_list in self.policy.embedding_stats_history.items():
+                            if value_list:  # 确保列表非空
+                                self.logger.log_scalar(f"embedding/{key}", value_list[-1], self.current_episode)        # 关闭统计收集
+        if self.enable_grad_check:
+            self.policy.collect_stats = False
+            
+        # 如果有更新发生，并且有数据，执行更新后的健康检查
+        if update_rounds > 0 and len(self.states) > 0:
+            # 为了健康检查，获取最后一个状态的数据
+            last_state = self.states[-1]
+            state_data = self._state_to_pyg_data(last_state)
+            self.perform_health_check(state_data, 'after_update')
 
         # 清空缓冲区并报告时间
         self._clear_buffers()
@@ -738,3 +949,40 @@ class GNNPPOAgent:
     def train_mode(self):
         """设置为训练模式"""
         self.policy.train()
+
+    def perform_health_check(self, state_data, check_point):
+        """执行健康检查
+        
+        Args:
+            state_data: PyG数据对象，用于健康检查
+            check_point: 检查点类型，例如'episode_start', 'episode_end', 'after_update'
+        """
+        if not self.enable_health_check or self.current_episode % self.health_check_freq != 0:
+            return False
+            
+        # 检查是否已在当前episode的该检查点执行过检查
+        if self.health_check_states[check_point]:
+            return False
+            
+        # 标记该检查点已执行检查
+        self.health_check_states[check_point] = True
+        
+        # 开始收集统计
+        self.policy.collect_stats = True
+        
+        # 确保一次前向传播以收集统计数据
+        with torch.no_grad():
+            self.policy.forward(state_data)
+        
+        # 打印检查点信息
+        print(f"\n[Episode {self.current_episode} - {check_point}] GNN健康状态检查:")
+        self.policy.print_embedding_stats(self.current_episode)
+        
+        # 如果开启了嵌入可视化并且到了可视化周期
+        if self.enable_embedding_vis and self.current_episode % self.vis_freq == 0:
+            self.policy.visualize_embeddings(state_data, self.current_episode)
+            
+        # 关闭统计收集
+        self.policy.collect_stats = False
+        
+        return True

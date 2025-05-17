@@ -374,6 +374,13 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
     episodes = config.get("episodes", 500)
     max_steps = config.get("max_steps", 100)
     gnn_ppo_config = config.get("gnn_ppo_config", {}) # 获取GNN-PPO配置
+    
+    # 启用GNN健康检查功能
+    gnn_ppo_config['enable_health_check'] = config.get("enable_health_check", True)
+    gnn_ppo_config['health_check_freq'] = config.get("health_check_freq", 10)
+    gnn_ppo_config['enable_grad_check'] = config.get("enable_grad_check", True)
+    gnn_ppo_config['enable_embedding_vis'] = config.get("enable_embedding_vis", True)
+    gnn_ppo_config['vis_freq'] = config.get("vis_freq", 50)
 
     # --- 修改：使用 new_environment 并传递参数 ---
     default_potential_weights = {'variance': 1.0, 'edge_cut': 1.0, 'modularity': 1.0}
@@ -389,24 +396,41 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
 
     # 初始化GNN-PPO代理
     agent = GNNPPOAgent(graph, num_partitions, gnn_ppo_config)
+    
+    # 创建结果目录
+    os.makedirs("results/embeddings", exist_ok=True)
+    os.makedirs("results/models", exist_ok=True)
 
     best_reward = float('-inf')
     best_partition = None
     rewards_history = []
     loss_history = []
-    variance_history = []    # 训练循环
+    variance_history = []
+    
+    # 训练循环    
     progress_bar = tqdm(range(episodes), desc="训练GNN-PPO")
     start_time = time.time()
     for e in progress_bar:
         state, _ = env.reset()
-        total_reward = 0        
+        total_reward = 0
+        
+        # 更新当前episode计数
+        agent.current_episode = e
+        
+        # 重置健康检查状态
+        if hasattr(agent, 'health_check_states'):
+            agent.health_check_states = {
+                'episode_start': False,
+                'episode_end': False,
+                'after_update': False
+            }
+        
         for step in range(max_steps):
             actual_action, log_prob, value = agent.act(state) # 解包元组，获取实际动作
             next_state, reward, done, _, _ = env.step(actual_action) # 将实际动作整数传递给 env.step
 
             agent.store_transition(reward, done)
-            
-            # 检查是否应该更新策略 - 重要更改：每步都检查，不再等到episode结束
+              # 检查是否应该更新策略 - 重要更改：每步都检查，不再等到episode结束
             if agent.should_update():
                 step_loss = agent.update()
                 # 记录当前更新的loss
@@ -418,7 +442,6 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
             
             state = next_state
             total_reward += reward
-
             if done:
                 break
 
@@ -432,6 +455,30 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
         partition_weights = calculate_partition_weights(graph, env.partition_assignment, num_partitions)
         weight_variance = np.var(partition_weights)
         variance_history.append(weight_variance)
+        
+        # 在episode结束时执行健康检查 (如果配置允许)
+        if hasattr(agent, 'perform_health_check') and hasattr(agent, 'health_check_states'):
+            # 获取最终状态数据用于健康检查
+            final_state_data = agent._state_to_pyg_data(state)
+            agent.perform_health_check(final_state_data, 'episode_end')
+        
+        # 如果开启了健康检查并且达到了检查频率，打印摘要指标
+        if agent.enable_health_check and e % agent.health_check_freq == 0:
+            # 记录当前嵌入统计信息到控制台
+            print(f"\n[Episode {e}] GNN-PPO性能摘要:")
+            print(f"奖励: {total_reward:.2f}, 最佳奖励: {best_reward:.2f}")
+            print(f"权重方差: {weight_variance:.2f}")
+            print(f"损失: {loss_history[-1] if loss_history else 0:.4f}")
+            
+            # 如果支持TensorBoard且启用了，将统计信息记录到TensorBoard
+            if agent.logger is not None:
+                agent.logger.log_scalar("health/weight_variance", weight_variance, e)
+        
+        # 每50个episodes保存一次模型快照
+        if e > 0 and e % 50 == 0:
+            snapshot_path = f"results/models/gnn_ppo_snapshot_ep{e}.pt"
+            agent.save_model(snapshot_path)
+            print(f"\n保存模型快照到 {snapshot_path}")
 
         # 更新进度条
         progress_bar.set_postfix({
@@ -446,8 +493,10 @@ def train_gnn_ppo_agent(graph, num_partitions, config):
             best_reward = total_reward
             best_partition = env.partition_assignment.copy()
 
+    # 打印最终性能统计
+    agent.print_performance_stats()
+
     # 保存模型
-    os.makedirs("results/models", exist_ok=True)
     agent.save_model(f"results/models/gnn_ppo_model_{len(graph.nodes())}nodes_{num_partitions}parts.pt")
 
     return best_partition, rewards_history, loss_history, variance_history
@@ -757,5 +806,106 @@ def main():
     print(df)
 
 
+def run_quick_health_check(episodes=50, max_steps=100, num_nodes=20, num_partitions=2):
+    """运行一个简短的训练循环，专注于GNN-PPO的健康检查"""
+    print("==== 启动GNN-PPO健康检查模式 ====")
+    print(f"运行{episodes}个episodes，每个最多{max_steps}步")
+    print(f"图: {num_nodes}个节点, {num_partitions}个分区")
+    
+    # 创建测试图
+    graph = create_test_graph(num_nodes=num_nodes, seed=42)
+    # 使用传入的分区数量
+    
+    # 创建配置
+    config = {
+        "episodes": episodes,
+        "max_steps": max_steps,
+        "gnn_ppo_config": {
+            "hidden_dim": 64,  # 减小隐藏维度以加快运行速度
+            "learning_rate": 0.0003,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_ratio": 0.2,
+            "ppo_epochs": 4,
+            "batch_size": 32,
+            "n_steps": 128,
+            "entropy_coef": 0.01,
+            "value_coef": 0.5,
+        },
+        # 健康检查设置
+        "enable_health_check": True,
+        "health_check_freq": 5,  # 每5个episode检查一次
+        "enable_grad_check": True,
+        "enable_embedding_vis": True,
+        "vis_freq": 10,  # 每10个episode可视化一次
+    }
+    
+    # 只运行GNN-PPO
+    print("\n训练GNN-PPO智能体...")
+    partition, rewards, losses, variances = train_gnn_ppo_agent(graph, num_partitions, config)
+    
+    # 评估分区质量
+    print("\n评估最终分区质量...")
+    eval_results = evaluate_partition(graph, partition, num_partitions)
+    
+    print("\n==== 健康检查结果 ====")
+    print("分区质量评估:")
+    for metric, value in eval_results.items():
+        print(f"- {metric}: {value}")
+    
+    # 画出训练曲线
+    plt.figure(figsize=(15, 12))
+    
+    plt.subplot(3, 1, 1)
+    plt.plot(rewards)
+    plt.title("GNN-PPO Reward Curve - Health Check")
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.grid(True)
+    
+    plt.subplot(3, 1, 2)
+    plt.plot(losses)
+    plt.title("GNN-PPO Loss Curve - Health Check")
+    plt.xlabel("Episode")
+    plt.ylabel("Loss")
+    plt.grid(True)
+    
+    plt.subplot(3, 1, 3)
+    plt.plot(variances)
+    plt.title("Partition Weight Variance - Health Check")
+    plt.xlabel("Episode")
+    plt.ylabel("Variance")
+    plt.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig("results/plots/gnn_ppo_health_check.png")
+    print("\n训练曲线已保存到 results/plots/gnn_ppo_health_check.png")
+    
+    return eval_results
+
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='运行图分区实验')
+    parser.add_argument('--mode', type=str, default='full', choices=['full', 'health-check'],
+                      help='运行模式: full=完整实验, health-check=GNN-PPO健康检查')
+    parser.add_argument('--episodes', type=int, default=50,
+                      help='健康检查模式的episodes数量')
+    parser.add_argument('--max-steps', type=int, default=100,
+                      help='每个episode的最大步数')
+    parser.add_argument('--nodes', type=int, default=20,
+                      help='图中的节点数量')
+    parser.add_argument('--partitions', type=int, default=2,
+                      help='分区数量')
+    
+    args = parser.parse_args()
+    
+    if args.mode == 'health-check':
+        run_quick_health_check(
+            episodes=args.episodes, 
+            max_steps=args.max_steps,
+            num_nodes=args.nodes,
+            num_partitions=args.partitions
+        )
+    else:
+        main()

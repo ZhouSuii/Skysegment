@@ -112,8 +112,8 @@
     - 25/5/11: 发现pbrs_edge_cut_weight 和 pbrs_modularity_weight 的重要性极低，可能需要修改reward -- 修改了tpo的objective value
     - 25/5/16: 修改gnnppo: 包括减少gnn网络层数，在gnn层添加残差连接，实现ppo值函数裁剪，可能需要添加聚合特征与修改网络参数初始化
     - 25/5/17: 分析与稳定gnn模块，现在在加入gnn模块后ppo与dqn都从收敛变到无法收敛：
-        - step1：检查gnn的输出是否合理  
-        - step2：梯度流检查
+        - step1：检查gnn的输出是否合理  --- gcn层与actor/critic层输出的嵌入范数持续增大
+        - step2：梯度流检查  --- 梯度爆炸与梯度范数剧烈变化/消失
         - step3：gnn架构再评估
 
 算法的实现与优化都感觉一个非常非常庞大的任务，很多时候都是在摸黑操作，像计算机一样的精密结构牵一发而动全身
