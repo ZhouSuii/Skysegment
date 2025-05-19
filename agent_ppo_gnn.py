@@ -20,10 +20,15 @@ class GNNPPOPolicy(nn.Module):
         self.conv1 = GCNConv(node_features, hidden_dim)
         self.conv2 = GCNConv(hidden_dim, hidden_dim)
         
+        # 添加层归一化，加强训练稳定性
+        self.layer_norm1 = nn.LayerNorm(hidden_dim)
+        self.layer_norm2 = nn.LayerNorm(hidden_dim)
+        
         # 简化Actor网络，移除多余的扩展-收缩结构
         self.actor = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),  # 维持一致的宽度
             nn.ReLU(),
+            nn.LayerNorm(hidden_dim),  # 添加LayerNorm改善稳定性
             nn.Linear(hidden_dim, output_dim),
             nn.Softmax(dim=-1)
         )
@@ -32,6 +37,7 @@ class GNNPPOPolicy(nn.Module):
         self.critic = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),  # 维持一致的宽度
             nn.ReLU(),
+            nn.LayerNorm(hidden_dim),  # 添加LayerNorm改善稳定性
             nn.Linear(hidden_dim, 1)
         )
         
@@ -54,8 +60,12 @@ class GNNPPOPolicy(nn.Module):
         x, edge_index = data.x, data.edge_index
 
         # 使用两层GNN并添加残差连接，减少过平滑问题
-        x1 = F.relu(self.conv1(x, edge_index))  # 第一层输出
-        x = F.relu(self.conv2(x1, edge_index)) + x1  # 第二层 + 残差连接
+        x1 = self.conv1(x, edge_index)
+        x1 = F.relu(self.layer_norm1(x1))  # 应用层归一化
+        
+        x2 = self.conv2(x1, edge_index)
+        x2 = F.relu(self.layer_norm2(x2))  # 应用层归一化
+        x = x2 + x1  # 残差连接
 
         # 对每个节点输出动作概率和状态价值
         action_probs = self.actor(x)
@@ -206,8 +216,7 @@ class GNNPPOPolicy(nn.Module):
             action_log_probs = dist.log_prob(actions)
             
             # 返回动作、对数概率和价值估计 - 保持结构一致
-            return actions.detach().cpu(), action_log_probs.detach().cpu(), values.detach().cpu()
-
+            return actions.detach().cpu(), action_log_probs.detach().cpu(), values.detach().cpu()    
     def act(self, data):
         """根据当前状态选择动作"""
         with torch.no_grad():  # 【优化6】确保使用torch.no_grad()减少内存占用
@@ -220,6 +229,59 @@ class GNNPPOPolicy(nn.Module):
             action_log_prob = dist.log_prob(action)
 
             return action.item(), action_log_prob, node_values
+    def select_action_and_log_prob(self, data):
+        """根据当前状态选择动作，返回原始logits和概率等信息"""
+        with torch.no_grad():
+            x, edge_index = data.x, data.edge_index
+
+            # 使用两层GNN并添加残差连接，减少过平滑问题
+            x1 = self.conv1(x, edge_index)
+            x1 = F.relu(self.layer_norm1(x1))  # 应用层归一化
+            
+            x2 = self.conv2(x1, edge_index)
+            x2 = F.relu(self.layer_norm2(x2))  # 应用层归一化
+            x = x2 + x1  # 残差连接
+            
+            # 提取actor的各层输出，保留softmax之前的logits
+            actor_features = x
+            
+            # 找到softmax之前的最后一层线性层
+            logits = None
+            last_linear = None
+            
+            # 分析actor网络结构，提取logits
+            # actor网络结构: Linear -> ReLU -> LayerNorm -> Linear -> Softmax
+            for i, layer in enumerate(self.actor):
+                if isinstance(layer, nn.Linear):
+                    last_linear = layer
+                if isinstance(layer, nn.Softmax):
+                    # 获取softmax之前的输出作为logits
+                    break
+            
+            # 如果成功找到了最后一个线性层，计算logits
+            if last_linear is not None:
+                # 将输入传递到倒数第二层
+                for i, layer in enumerate(self.actor):
+                    actor_features = layer(actor_features)
+                    if layer == last_linear:
+                        # 获取最后一个线性层的输出作为logits
+                        logits = actor_features
+                        break
+            
+            # 继续计算完整的前向过程以获取概率
+            action_probs, node_values = self.forward(data)
+            action_probs_flat = action_probs.view(-1)
+            
+            # 创建动作分布并采样
+            dist = Categorical(action_probs_flat)
+            action = dist.sample()
+            action_log_prob = dist.log_prob(action)
+            
+            # 如果没能正确提取logits，使用概率的对数作为近似
+            if logits is None:
+                logits = torch.log(action_probs + 1e-10)  # 添加小值防止log(0)
+            
+            return action.item(), action_log_prob, node_values, logits, action_probs
 
     def evaluate(self, data, action):
         """评估动作的价值和概率"""
@@ -266,6 +328,15 @@ class GNNPPOAgent:
         self.hidden_dim = config.get('hidden_dim', 256)  # 增加默认隐藏层维度
         self.use_cuda_streams = config.get('use_cuda_streams', True)
         self.jit_compile = config.get('jit_compile', False)  # 是否使用JIT编译
+        
+        # 添加梯度裁剪参数
+        self.max_grad_norm = config.get('max_grad_norm', 0.5)
+        
+        # 添加学习率调度器配置
+        self.use_lr_scheduler = config.get('use_lr_scheduler', True)
+        self.lr_scheduler_factor = config.get('lr_scheduler_factor', 0.5)
+        self.lr_scheduler_patience = config.get('lr_scheduler_patience', 10)
+        self.lr_scheduler_min = config.get('lr_scheduler_min', 1e-6)
     
         # 【优化9】添加设备检测
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -283,6 +354,20 @@ class GNNPPOAgent:
             lr=self.learning_rate,
             betas=(self.adam_beta1, self.adam_beta2) # 传入 betas 元组
         )
+        
+        # 添加学习率调度器，在训练停滞时降低学习率
+        if self.use_lr_scheduler:
+            self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='max',           # 使用'max'模式，因为我们希望奖励最大化
+                factor=self.lr_scheduler_factor,
+                patience=self.lr_scheduler_patience,
+                verbose=True,
+                min_lr=self.lr_scheduler_min
+            )
+            print(f"启用学习率调度器: patience={self.lr_scheduler_patience}, factor={self.lr_scheduler_factor}")
+        else:
+            self.lr_scheduler = None
 
         # 【优化10】使用更高效的数据存储方式
         self.states = []
@@ -300,8 +385,7 @@ class GNNPPOAgent:
 
         # 构建固定的图结构
         self._build_graph_structure()
-        
-        # 【优化12】预分配缓冲区，减少内存分配
+          # 【优化12】预分配缓冲区，减少内存分配
         self.prefetch_data = None
         self.prefetch_actions = None
 
@@ -316,50 +400,45 @@ class GNNPPOAgent:
             self.logger = None
 
         self.state_cache = {}  # 添加状态缓存
-
-        # 初始化缓存机制
-        self._init_caches()
-
-        # 添加健康检查配置
+        
+        # 添加健康检查相关属性
         self.enable_health_check = config.get('enable_health_check', False)
-        self.health_check_freq = config.get('health_check_freq', 10)  # 每10个episode进行一次健康检查
+        self.health_check_freq = config.get('health_check_freq', 10)
         self.enable_grad_check = config.get('enable_grad_check', False)
         self.enable_embedding_vis = config.get('enable_embedding_vis', False)
-        self.vis_freq = config.get('vis_freq', 50)  # 每50个episode可视化一次嵌入
-        
-        # 健康检查控制标记
-        self.health_check_states = {
-            'episode_start': False,  # 是否已在当前episode开始时打印
-            'episode_end': False,    # 是否已在当前episode结束时打印
-            'after_update': False,   # 是否已在当前更新后打印
-        }
-        
-        # 如果开启了梯度检查，设置钩子
-        if self.enable_grad_check:
-            self.policy.setup_grad_hooks()
-            
-        # 当前episode计数器
+        self.vis_freq = config.get('vis_freq', 50)
         self.current_episode = 0
-
-    def _init_caches(self):
-        """初始化缓存字典，用于存储前向传播结果"""
-        self.feature_cache = {}  # 存储GNN前向传播特征
+        self.health_check_states = {
+            'episode_start': False,
+            'episode_end': False,
+            'after_update': False
+        }        
+        # 添加奖励归一化配置
+        self.use_reward_norm = config.get('use_reward_norm', True)
+        self.reward_norm_scale = config.get('reward_norm_scale', 1.0)
+        self.running_reward_mean = 0
+        self.running_reward_std = 1
+        self.reward_ema_factor = config.get('reward_ema_factor', 0.99)  # 指数移动平均因子
+        
+        # 初始化缓存
+        self.state_cache = {}  # 存储GNN前向传播特征
         self.max_cache_size = 1000  # 最大缓存大小
         
     def _clear_cache(self):
         """清除特征缓存"""
-        self.feature_cache.clear()
-
+        if hasattr(self, 'state_cache'):
+            self.state_cache.clear()
+            
     def _check_feature_cache(self, state_hash):
         """检查特征缓存，如果命中则返回缓存的特征，否则返回None"""
         # 如果缓存太大，清除一半
-        if len(self.feature_cache) > self.max_cache_size:
+        if hasattr(self, 'state_cache') and len(self.state_cache) > self.max_cache_size:
             # 简单策略：删除一半
-            keys_to_remove = list(self.feature_cache.keys())[:len(self.feature_cache)//2]
+            keys_to_remove = list(self.state_cache.keys())[:len(self.state_cache)//2]
             for key in keys_to_remove:
-                del self.feature_cache[key]
+                del self.state_cache[key]
                 
-        return self.feature_cache.get(state_hash, None)
+        return self.state_cache.get(state_hash, None)
 
     def _build_graph_structure(self):
         """构建PyG的图数据结构"""
@@ -596,7 +675,6 @@ class GNNPPOAgent:
             batch_data_list.append(data)
             
         return Batch.from_data_list(batch_data_list).to(self.device)
-        
     def act(self, state):
         """根据当前状态选择动作"""
         # 【优化17】使用计时器评估性能瓶颈
@@ -614,12 +692,19 @@ class GNNPPOAgent:
         self.perform_health_check(state_data, 'episode_start')
             
         with torch.no_grad():
-            # 优化：只执行一次前向传播，同时获取动作和价值估计
-            action_tensor, log_prob_tensor, values_nodes = self.policy.act(state_data)
-            action = action_tensor # .item() 已经在 policy.act 中处理
+            # 使用 select_action_and_log_prob 方法同时获取logits和概率
+            action_tensor, log_prob_tensor, values_nodes, logits, probs = self.policy.select_action_and_log_prob(state_data)
+            action = action_tensor # .item() 已经在 policy.select_action_and_log_prob 中处理
             log_prob = log_prob_tensor
             value = values_nodes.mean().item()  # 使用所有节点值的平均作为状态价值
             self.forward_time += time.time() - conversion_end
+            
+            # 存储logits和probs用于健康检查
+            if hasattr(self, '_last_action_info'):
+                self._last_action_info = {
+                    'logits': logits.detach().cpu(),
+                    'probs': probs.detach().cpu()
+                }
 
         # 存储当前轨迹信息 - 注意我们现在存储原始状态，不预先转换
         self.states.append(state)  # 存储原始NumPy状态
@@ -629,8 +714,36 @@ class GNNPPOAgent:
         
         return action, log_prob, value
     def store_transition(self, reward, done):
-        """存储奖励和状态终止信号"""
-        self.rewards.append(reward)
+        """存储奖励和状态终止信号，并进行奖励归一化"""
+        # 应用奖励归一化
+        if self.use_reward_norm:
+            # 更新运行统计量 (使用指数移动平均)
+            if len(self.rewards) == 0:  # 首次设置
+                self.running_reward_mean = reward
+                self.running_reward_std = abs(reward) + 1e-8
+            else:
+                self.running_reward_mean = self.reward_ema_factor * self.running_reward_mean + \
+                                          (1 - self.reward_ema_factor) * reward
+                reward_diff = abs(reward - self.running_reward_mean)
+                self.running_reward_std = self.reward_ema_factor * self.running_reward_std + \
+                                         (1 - self.reward_ema_factor) * reward_diff
+            
+            # 归一化奖励
+            norm_reward = (reward - self.running_reward_mean) / (self.running_reward_std + 1e-8)
+            # 缩放归一化后的奖励
+            scaled_norm_reward = norm_reward * self.reward_norm_scale
+            
+            # 记录原始奖励和归一化奖励
+            if self.logger is not None and len(self.rewards) % 10 == 0:
+                self.logger.log_scalar("rewards/original", reward, len(self.rewards))
+                self.logger.log_scalar("rewards/normalized", scaled_norm_reward, len(self.rewards))
+                self.logger.log_scalar("rewards/mean", self.running_reward_mean, len(self.rewards))
+                self.logger.log_scalar("rewards/std", self.running_reward_std, len(self.rewards))
+                
+            self.rewards.append(scaled_norm_reward)
+        else:
+            self.rewards.append(reward)
+            
         self.dones.append(done)
     
     def should_update(self):
@@ -778,7 +891,7 @@ class GNNPPOAgent:
                         print(f"[Warning] Large gradient norm: {max_grad_norm:.4f}")
                 
                 # 使用原地操作进行梯度裁剪
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.max_grad_norm)
                 self.optimizer.step()
                 
                 total_loss += loss.item()
@@ -816,6 +929,21 @@ class GNNPPOAgent:
         # 每隔一段时间清除缓存以防止内存泄漏
         if hasattr(self, 'state_cache') and len(self.state_cache) > 1000:
             self.state_cache.clear()
+        
+        # 应用学习率调度器，使用当前episode的平均奖励来调整学习率
+        if self.use_lr_scheduler and len(self.rewards) > 0 and update_rounds > 0:
+            avg_reward = sum(self.rewards) / len(self.rewards)
+            # 对于学习率调度器，使用平均奖励作为指标（因为我们想最大化奖励）
+            self.lr_scheduler.step(avg_reward)
+            
+            # 记录当前学习率
+            current_lr = self.optimizer.param_groups[0]['lr']
+            if self.logger is not None:
+                self.logger.log_scalar("training/learning_rate", current_lr, self.current_episode)
+                
+            # 打印当前学习率（每10个episode一次）
+            if self.current_episode % 10 == 0:
+                print(f"当前学习率: {current_lr:.6f}")
         
         return total_loss / max(1, update_rounds)
 
@@ -948,8 +1076,7 @@ class GNNPPOAgent:
     # 【优化28】添加训练模式方法
     def train_mode(self):
         """设置为训练模式"""
-        self.policy.train()
-
+        self.policy.train()    
     def perform_health_check(self, state_data, check_point):
         """执行健康检查
         
@@ -972,10 +1099,83 @@ class GNNPPOAgent:
         
         # 确保一次前向传播以收集统计数据
         with torch.no_grad():
-            self.policy.forward(state_data)
+            # 使用select_action_and_log_prob来获取更详细的信息
+            _, _, _, logits, probs = self.policy.select_action_and_log_prob(state_data)
+            
+            # 分析logits（softmax之前的值）
+            logits_mean = logits.mean().item()
+            logits_std = logits.std().item()
+            logits_min = logits.min().item()
+            logits_max = logits.max().item()
+            
+            # 分析输出概率
+            probs_mean = probs.mean().item()
+            probs_std = probs.std().item()
+            probs_min = probs.min().item()
+            probs_max = probs.max().item()
+              # 检查Actor网络最后一个线性层的权重和偏置
+            last_linear_layer = None
+            
+            # 更严格地查找最后一个线性层 (排除softmax后面的层)
+            found_softmax = False
+            for module in reversed(list(self.policy.actor)):
+                if isinstance(module, nn.Softmax):
+                    found_softmax = True
+                elif isinstance(module, nn.Linear) and not found_softmax:
+                    last_linear_layer = module
+                    break
+            
+            # 如果没找到，再尝试查找任何线性层
+            if last_linear_layer is None:
+                for module in reversed(list(self.policy.actor)):
+                    if isinstance(module, nn.Linear):
+                        last_linear_layer = module
+                        break
+                        
+            if last_linear_layer is not None:
+                weights = last_linear_layer.weight.detach()
+                biases = last_linear_layer.bias.detach() if last_linear_layer.bias is not None else None
+                
+                # 计算权重和偏置的统计信息
+                weights_mean = weights.mean().item()
+                weights_std = weights.std().item()
+                weights_norm = weights.norm().item()
+                
+                # 如果分区数为2，计算两个分区对应的权重向量之间的差异
+                if self.num_partitions == 2 and weights.size(0) == 2:
+                    weight_diff = (weights[0] - weights[1]).abs().mean().item()
+                    
+                    if biases is not None:
+                        bias_diff = abs(biases[0].item() - biases[1].item())
+                    else:
+                        bias_diff = 0.0
+            
+            # 打印详细的诊断信息
+            print(f"\n[Episode {self.current_episode} - {check_point}] GNN健康状态检查:")
+            print("===== Actor 网络输出检查 =====")
+            print(f"Logits 统计: 均值={logits_mean:.4f}, 标准差={logits_std:.4f}, 最小值={logits_min:.4f}, 最大值={logits_max:.4f}")
+            print(f"Probs 统计: 均值={probs_mean:.4f}, 标准差={probs_std:.4f}, 最小值={probs_min:.4f}, 最大值={probs_max:.4f}")
+            
+            if last_linear_layer is not None:
+                print("\n===== Actor 最后一层线性层检查 =====")
+                print(f"权重统计: 均值={weights_mean:.4f}, 标准差={weights_std:.4f}, 范数={weights_norm:.4f}")
+                
+                if self.num_partitions == 2 and weights.size(0) == 2:
+                    print(f"两个分区权重向量的平均绝对差: {weight_diff:.6f}")
+                    if biases is not None:
+                        print(f"两个分区偏置的绝对差: {bias_diff:.6f}")
+                        print(f"偏置值: [{biases[0].item():.6f}, {biases[1].item():.6f}]")
+            
+            # 为两个分区的情况，直接打印整个权重矩阵和偏置值
+            if self.num_partitions == 2 and weights.size(0) == 2:
+                print("\n完整权重矩阵:")
+                print(weights.cpu().numpy())
+                
+                if biases is not None:
+                    print("\n完整偏置向量:")
+                    print(biases.cpu().numpy())
         
-        # 打印检查点信息
-        print(f"\n[Episode {self.current_episode} - {check_point}] GNN健康状态检查:")
+        # 打印嵌入统计信息
         self.policy.print_embedding_stats(self.current_episode)
         
         # 如果开启了嵌入可视化并且到了可视化周期
