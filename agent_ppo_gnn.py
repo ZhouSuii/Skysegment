@@ -16,30 +16,32 @@ class GNNPPOPolicy(nn.Module):
         super(GNNPPOPolicy, self).__init__()
         self.num_partitions = num_partitions
 
-        # 简化为两层GNN，减少过平滑问题
-        self.conv1 = GCNConv(node_features, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        # 简化网络结构，减少过拟合和梯度消失
+        self.conv1 = GCNConv(node_features, hidden_dim // 2)  # 减小隐藏层维度
+        self.conv2 = GCNConv(hidden_dim // 2, hidden_dim // 2)
         
-        # 添加层归一化，加强训练稳定性
-        self.layer_norm1 = nn.LayerNorm(hidden_dim)
-        self.layer_norm2 = nn.LayerNorm(hidden_dim)
+        # 移除LayerNorm，简化网络结构
+        self.dropout = nn.Dropout(0.1)
         
-        # 简化Actor网络，移除多余的扩展-收缩结构
+        # 简化Actor网络，直接输出logits，移除Softmax
         self.actor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),  # 维持一致的宽度
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.ReLU(),
-            nn.LayerNorm(hidden_dim),  # 添加LayerNorm改善稳定性
-            nn.Linear(hidden_dim, output_dim),
-            nn.Softmax(dim=-1)
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 4, output_dim)
+            # 移除Softmax，在外部计算
         )
         
-        # 简化Critic网络，减少参数量
+        # 简化Critic网络
         self.critic = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),  # 维持一致的宽度
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.ReLU(),
-            nn.LayerNorm(hidden_dim),  # 添加LayerNorm改善稳定性
-            nn.Linear(hidden_dim, 1)
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 4, 1)
         )
+        
+        # 使用Xavier初始化改善权重初始化
+        self.apply(self._init_weights)
         
         # 添加用于健康检查的嵌入跟踪
         self.embedding_stats_history = {
@@ -55,50 +57,60 @@ class GNNPPOPolicy(nn.Module):
         # 钩子函数，用于跟踪梯度
         self.hooks = []
         self.collect_stats = False
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, gain=1.0)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, GCNConv):
+            # GCNConv内部有线性层，需要初始化
+            if hasattr(module, 'lin') and module.lin is not None:
+                nn.init.xavier_uniform_(module.lin.weight, gain=1.0)
+                if hasattr(module.lin, 'bias') and module.lin.bias is not None:
+                    nn.init.zeros_(module.lin.bias)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
-
-        # 使用两层GNN并添加残差连接，减少过平滑问题
-        x1 = self.conv1(x, edge_index)
-        x1 = F.relu(self.layer_norm1(x1))  # 应用层归一化
         
-        x2 = self.conv2(x1, edge_index)
-        x2 = F.relu(self.layer_norm2(x2))  # 应用层归一化
-        x = x2 + x1  # 残差连接
+        # GNN前向传播
+        x1 = F.relu(self.conv1(x, edge_index))
+        x1 = self.dropout(x1)
+        x2 = F.relu(self.conv2(x1, edge_index)) 
+        x2 = self.dropout(x2)
+        
+        # Actor和Critic输出
+        logits = self.actor(x2)
+        values = self.critic(x2)
+        action_probs = F.softmax(logits, dim=-1)
+        
+        return logits, values, action_probs
 
-        # 对每个节点输出动作概率和状态价值
-        action_probs = self.actor(x)
-        values = self.critic(x)
-
-        # 如果开启了统计收集，记录各层的嵌入统计信息
-        if self.collect_stats:
-            self._collect_embedding_stats(x1, x, action_probs, values)
-
-        return action_probs, values
+    def evaluate(self, data, action):
+        logits, values, action_probs = self.forward(data)
+        action_probs_flat = action_probs.view(-1)
+        dist = Categorical(action_probs_flat)
+        action_log_probs = dist.log_prob(action)
+        entropy = dist.entropy()
+        return action_log_probs, values, entropy
     
     def _collect_embedding_stats(self, layer1_out, layer2_out, actor_out, critic_out):
-        """收集各层嵌入的统计信息"""
-        with torch.no_grad():
-            # 收集第一层GNN输出统计信息
-            self.embedding_stats_history['layer1_mean'].append(layer1_out.mean().item())
-            self.embedding_stats_history['layer1_std'].append(layer1_out.std().item())
-            self.embedding_stats_history['layer1_norm'].append(layer1_out.norm().item())
-            
-            # 收集第二层GNN输出统计信息
-            self.embedding_stats_history['layer2_mean'].append(layer2_out.mean().item())
-            self.embedding_stats_history['layer2_std'].append(layer2_out.std().item())
-            self.embedding_stats_history['layer2_norm'].append(layer2_out.norm().item())
-            
-            # 收集Actor网络输出统计信息
-            self.embedding_stats_history['actor_mean'].append(actor_out.mean().item())
-            self.embedding_stats_history['actor_std'].append(actor_out.std().item())
-            self.embedding_stats_history['actor_norm'].append(actor_out.norm().item())
-            
-            # 收集Critic网络输出统计信息
-            self.embedding_stats_history['critic_mean'].append(critic_out.mean().item())
-            self.embedding_stats_history['critic_std'].append(critic_out.std().item())
-            self.embedding_stats_history['critic_norm'].append(critic_out.norm().item())
+        """修复统计信息收集，确保正确存储到embedding_stats_history中"""
+        # 计算并直接存储统计信息到embedding_stats_history字典中
+        self.embedding_stats_history['layer1_mean'].append(layer1_out.mean().item())
+        self.embedding_stats_history['layer1_std'].append(layer1_out.std().item())
+        self.embedding_stats_history['layer1_norm'].append(layer1_out.norm().item())
+        
+        self.embedding_stats_history['layer2_mean'].append(layer2_out.mean().item())
+        self.embedding_stats_history['layer2_std'].append(layer2_out.std().item())
+        self.embedding_stats_history['layer2_norm'].append(layer2_out.norm().item())
+        
+        self.embedding_stats_history['actor_mean'].append(actor_out.mean().item())
+        self.embedding_stats_history['actor_std'].append(actor_out.std().item())
+        self.embedding_stats_history['actor_norm'].append(actor_out.norm().item())
+        
+        self.embedding_stats_history['critic_mean'].append(critic_out.mean().item())
+        self.embedding_stats_history['critic_std'].append(critic_out.std().item())
+        self.embedding_stats_history['critic_norm'].append(critic_out.norm().item())
     
     def setup_grad_hooks(self):
         """设置梯度钩子，用于监控梯度流"""
@@ -134,12 +146,8 @@ class GNNPPOPolicy(nn.Module):
         for hook in self.hooks:
             hook.remove()
         self.hooks = []
-    
     def print_embedding_stats(self, episode):
         """打印嵌入统计信息"""
-        if not self.embedding_stats_history['layer1_mean']:  # 检查是否有数据
-            return
-            
         # 获取最新的统计数据
         stats = {}
         for key, value_list in self.embedding_stats_history.items():
@@ -162,7 +170,6 @@ class GNNPPOPolicy(nn.Module):
             for key, values in self.grad_stats_history.items():
                 if values:  # 确保列表非空
                     print(f"{key}: {values[-1]:.4f}")
-    
     def visualize_embeddings(self, data, episode, output_dir="results/embeddings"):
         """可视化节点嵌入"""
         import os
@@ -234,66 +241,28 @@ class GNNPPOPolicy(nn.Module):
         with torch.no_grad():
             x, edge_index = data.x, data.edge_index
 
-            # 使用两层GNN并添加残差连接，减少过平滑问题
-            x1 = self.conv1(x, edge_index)
-            x1 = F.relu(self.layer_norm1(x1))  # 应用层归一化
+            # 使用简化的GNN结构（与forward方法保持一致）
+            x = F.relu(self.conv1(x, edge_index))
+            x = self.dropout(x)
+            x = F.relu(self.conv2(x, edge_index))
+            x = self.dropout(x)
             
-            x2 = self.conv2(x1, edge_index)
-            x2 = F.relu(self.layer_norm2(x2))  # 应用层归一化
-            x = x2 + x1  # 残差连接
+            # 获取actor的logits（softmax之前的输出）
+            logits = self.actor(x)
             
-            # 提取actor的各层输出，保留softmax之前的logits
-            actor_features = x
-            
-            # 找到softmax之前的最后一层线性层
-            logits = None
-            last_linear = None
-            
-            # 分析actor网络结构，提取logits
-            # actor网络结构: Linear -> ReLU -> LayerNorm -> Linear -> Softmax
-            for i, layer in enumerate(self.actor):
-                if isinstance(layer, nn.Linear):
-                    last_linear = layer
-                if isinstance(layer, nn.Softmax):
-                    # 获取softmax之前的输出作为logits
-                    break
-            
-            # 如果成功找到了最后一个线性层，计算logits
-            if last_linear is not None:
-                # 将输入传递到倒数第二层
-                for i, layer in enumerate(self.actor):
-                    actor_features = layer(actor_features)
-                    if layer == last_linear:
-                        # 获取最后一个线性层的输出作为logits
-                        logits = actor_features
-                        break
-            
-            # 继续计算完整的前向过程以获取概率
-            action_probs, node_values = self.forward(data)
+            # 计算动作概率
+            action_probs = F.softmax(logits, dim=-1)
             action_probs_flat = action_probs.view(-1)
+            
+            # 获取critic的输出
+            values = self.critic(x)
             
             # 创建动作分布并采样
             dist = Categorical(action_probs_flat)
             action = dist.sample()
             action_log_prob = dist.log_prob(action)
             
-            # 如果没能正确提取logits，使用概率的对数作为近似
-            if logits is None:
-                logits = torch.log(action_probs + 1e-10)  # 添加小值防止log(0)
-            
-            return action.item(), action_log_prob, node_values, logits, action_probs
-
-    def evaluate(self, data, action):
-        """评估动作的价值和概率"""
-        action_probs, node_values = self.forward(data)
-        action_probs_flat = action_probs.view(-1)
-
-        dist = Categorical(action_probs_flat)
-        action_log_probs = dist.log_prob(action)
-        entropy = dist.entropy()
-
-        return action_log_probs, node_values, entropy
-
+            return action.item(), action_log_prob, values, logits, action_probs
 
 # GNN-PPO智能体
 class GNNPPOAgent:
@@ -312,25 +281,24 @@ class GNNPPOAgent:
 
         self.gamma = config.get('gamma', 0.99)
         self.gae_lambda = config.get('gae_lambda', 0.95)
-        self.clip_ratio = config.get('clip_ratio', 0.2)
-        self.learning_rate = config.get('learning_rate', 0.0003)
+        self.clip_ratio = config.get('clip_ratio', 0.1)
+        self.learning_rate = config.get('learning_rate', 0.0001)
         self.ppo_epochs = config.get('ppo_epochs', 2)  
         self.batch_size = config.get('batch_size', 64)
         self.entropy_coef = config.get('entropy_coef', 0.01)
         self.value_coef = config.get('value_coef', 0.5)
-        self.hidden_dim = config.get('hidden_dim', 128)
+        self.hidden_dim = config.get('hidden_dim', 32)
         self.adam_beta1 = config.get('adam_beta1', 0.9) 
         self.adam_beta2 = config.get('adam_beta2', 0.999)
         # 修改：将update_frequency更名为n_steps，并设置更合理的默认值
         self.n_steps = config.get('n_steps', config.get('update_frequency', 128))
         
         # 增加新的GPU优化配置
-        self.hidden_dim = config.get('hidden_dim', 256)  # 增加默认隐藏层维度
         self.use_cuda_streams = config.get('use_cuda_streams', True)
         self.jit_compile = config.get('jit_compile', False)  # 是否使用JIT编译
         
         # 添加梯度裁剪参数
-        self.max_grad_norm = config.get('max_grad_norm', 0.5)
+        self.max_grad_norm = config.get('max_grad_norm', 0.3)
         
         # 添加学习率调度器配置
         self.use_lr_scheduler = config.get('use_lr_scheduler', True)
@@ -349,10 +317,12 @@ class GNNPPOAgent:
         # 初始化策略网络
         self.policy = GNNPPOPolicy(self.node_features, self.hidden_dim,
                                    num_partitions, num_partitions).to(self.device)
+        # 使用更保守的优化器设置
         self.optimizer = torch.optim.Adam(
             self.policy.parameters(),
             lr=self.learning_rate,
-            betas=(self.adam_beta1, self.adam_beta2) # 传入 betas 元组
+            eps=1e-5,  # 增加epsilon提高数值稳定性
+            weight_decay=1e-4  # 添加权重衰减
         )
         
         # 添加学习率调度器，在训练停滞时降低学习率
@@ -468,31 +438,31 @@ class GNNPPOAgent:
         self.fixed_features[:, 1] = self.node_degrees
 
     def _state_to_pyg_data(self, state, batch_mode=False):
-        """将环境状态转换为PyG数据对象，优化CPU-GPU数据传输"""
-        state_hash = hash(state.tobytes())
-        if state_hash in self.state_cache:
+        """修复状态转换，确保输入特征非零并添加调试信息"""
+        state_hash = hash(state.tobytes()) if not batch_mode else None
+        if state_hash and state_hash in self.state_cache:
             return self.state_cache[state_hash]
         
-        # 使用临时缓冲区避免重复分配内存
+        # 确保输入特征有足够的变化
         if not hasattr(self, '_features_buffer'):
             self._features_buffer = np.zeros((self.num_nodes, self.node_features), dtype=np.float32)
         
-        x_np = self._features_buffer # 使用预分配的 NumPy 数组
-        x_np[:, :self.num_partitions] = state[:, :self.num_partitions]
-        x_np[:, self.num_partitions:] = self.fixed_features
+        x_np = self._features_buffer
         
-        # 一次性填充分区数据
-        x_tensor_cpu = torch.from_numpy(x_np.copy()) # 创建副本以防万一
-        # 2. 将 CPU 张量放入锁页内存
-        x_tensor_pinned = x_tensor_cpu.pin_memory()
-        # 3. 异步传输到 GPU
-        x_tensor = x_tensor_pinned.to(self.device, non_blocking=True)
-        # --- 修改结束 ---
-
-        # 假设 self.edge_index 已经在 GPU 上
+        # 填充one-hot分区编码
+        x_np[:, :self.num_partitions] = state[:, :self.num_partitions]
+        
+        # 添加节点权重和度特征（确保非零）
+        x_np[:, self.num_partitions] = self.node_weights  # 原始权重
+        x_np[:, self.num_partitions + 1] = self.node_degrees  # 归一化度
+          # 转换为tensor并移动到GPU
+        x_tensor = torch.from_numpy(x_np.copy()).to(self.device)
+        
+        # 创建数据对象
         data = Data(x=x_tensor, edge_index=self.edge_index)
-
-        self.state_cache[state_hash] = data
+        
+        if state_hash:
+            self.state_cache[state_hash] = data
         return data
     
     def _states_to_batch_data_optimized(self, states_list):
@@ -675,72 +645,55 @@ class GNNPPOAgent:
             batch_data_list.append(data)
             
         return Batch.from_data_list(batch_data_list).to(self.device)
+
     def act(self, state):
         """根据当前状态选择动作"""
-        # 【优化17】使用计时器评估性能瓶颈
         start = time.time()
         
-        # 将状态转换为PyG数据 - 这部分仍需要实时转换以做出决策
+        # 将状态转换为PyG数据
         state_data = self._state_to_pyg_data(state)
         
         conversion_end = time.time()
         self.conversion_time += conversion_end - start
 
-        value = 0.0 # 初始化 value
-        log_prob = None # 初始化 log_prob
-        action = 0 # 初始化 action        # 在episode开始时执行健康检查
+        # 在episode开始时执行健康检查
         self.perform_health_check(state_data, 'episode_start')
             
         with torch.no_grad():
-            # 使用 select_action_and_log_prob 方法同时获取logits和概率
-            action_tensor, log_prob_tensor, values_nodes, logits, probs = self.policy.select_action_and_log_prob(state_data)
-            action = action_tensor # .item() 已经在 policy.select_action_and_log_prob 中处理
-            log_prob = log_prob_tensor
-            value = values_nodes.mean().item()  # 使用所有节点值的平均作为状态价值
-            self.forward_time += time.time() - conversion_end
-            
-            # 存储logits和probs用于健康检查
-            if hasattr(self, '_last_action_info'):
-                self._last_action_info = {
-                    'logits': logits.detach().cpu(),
-                    'probs': probs.detach().cpu()
-                }
+            action_probs, node_values = self.policy(state_data)
+            action_probs_flat = action_probs.view(-1)
 
-        # 存储当前轨迹信息 - 注意我们现在存储原始状态，不预先转换
-        self.states.append(state)  # 存储原始NumPy状态
-        self.actions.append(action)
-        self.log_probs.append(log_prob)
+            # 创建动作分布并采样
+            dist = Categorical(action_probs_flat)
+            action = dist.sample()
+            action_log_prob = dist.log_prob(action)
+            
+            value = node_values.mean().item()  # 使用所有节点值的平均作为状态价值
+            self.forward_time += time.time() - conversion_end
+
+        # 存储当前轨迹信息
+        self.states.append(state)
+        self.actions.append(action.item())
+        self.log_probs.append(action_log_prob)
         self.values.append(value)
         
-        return action, log_prob, value
+        return action.item(), action_log_prob, value
+
     def store_transition(self, reward, done):
-        """存储奖励和状态终止信号，并进行奖励归一化"""
-        # 应用奖励归一化
+        """修复奖励归一化，避免数值不稳定"""
         if self.use_reward_norm:
-            # 更新运行统计量 (使用指数移动平均)
-            if len(self.rewards) == 0:  # 首次设置
-                self.running_reward_mean = reward
-                self.running_reward_std = abs(reward) + 1e-8
+            # 使用更稳定的归一化方法
+            if len(self.rewards) < 10:  # 前几步不进行归一化
+                self.rewards.append(reward)
             else:
-                self.running_reward_mean = self.reward_ema_factor * self.running_reward_mean + \
-                                          (1 - self.reward_ema_factor) * reward
-                reward_diff = abs(reward - self.running_reward_mean)
-                self.running_reward_std = self.reward_ema_factor * self.running_reward_std + \
-                                         (1 - self.reward_ema_factor) * reward_diff
-            
-            # 归一化奖励
-            norm_reward = (reward - self.running_reward_mean) / (self.running_reward_std + 1e-8)
-            # 缩放归一化后的奖励
-            scaled_norm_reward = norm_reward * self.reward_norm_scale
-            
-            # 记录原始奖励和归一化奖励
-            if self.logger is not None and len(self.rewards) % 10 == 0:
-                self.logger.log_scalar("rewards/original", reward, len(self.rewards))
-                self.logger.log_scalar("rewards/normalized", scaled_norm_reward, len(self.rewards))
-                self.logger.log_scalar("rewards/mean", self.running_reward_mean, len(self.rewards))
-                self.logger.log_scalar("rewards/std", self.running_reward_std, len(self.rewards))
+                # 使用滑动窗口计算统计量
+                recent_rewards = self.rewards[-100:] + [reward]  # 最近100个奖励
+                mean_reward = np.mean(recent_rewards)
+                std_reward = np.std(recent_rewards) + 1e-8
                 
-            self.rewards.append(scaled_norm_reward)
+                # 限制归一化的范围，避免极端值
+                normalized_reward = np.clip((reward - mean_reward) / std_reward, -5, 5)
+                self.rewards.append(normalized_reward)
         else:
             self.rewards.append(reward)
             
@@ -758,55 +711,42 @@ class GNNPPOAgent:
         return x
         
     def update(self):
-        """优化的PPO算法更新，使用subgraph简化子图构建和向量化操作减少同步点"""
-        # 如果数据不足，直接返回
+        """修复价值函数聚合和梯度流问题"""
         if len(self.rewards) < self.n_steps:
             return 0.0
 
         start = time.time()
-
-        if len(self.rewards) == 0:
-            return 0.0
-            
-        # 计算回报和优势 (在GPU上)
+        
+        # 计算回报和优势
         returns_t, advantages_t, values_t = self._compute_returns_advantages_vectorized()
 
-        # 使用异步处理批量转换状态
-        state_processing_start = time.time()
+        # 批量转换状态
         state_datas = self._states_to_batch_data_optimized(self.states)
-        self.conversion_time += time.time() - state_processing_start
 
         # 一次性将所有数据传输到GPU
         actions = torch.tensor(self.actions, dtype=torch.long, device=self.device)
         old_log_probs = torch.stack([lp.to(self.device) if isinstance(lp, torch.Tensor) else 
                                 torch.tensor(lp, device=self.device) for lp in self.log_probs])
 
-        # 用于统计的变量
         total_loss = 0.0
         update_rounds = 0
         dataset_size = len(self.states)
-        effective_batch_size = min(self.batch_size, dataset_size)
-
-        # 如果开启了梯度检查，启用收集统计
-        if self.enable_grad_check and self.current_episode % self.health_check_freq == 0:
-            self.policy.collect_stats = True
+        effective_batch_size = min(self.batch_size, dataset_size)        # 保留训练数据大小但不打印详细信息
+        dataset_size = len(self.states)
 
         # PPO更新循环
-        for _ in range(self.ppo_epochs):
-            # 在GPU上生成随机索引
+        for epoch in range(self.ppo_epochs):
             indices = torch.randperm(dataset_size, device=self.device)
 
             for i in range(0, dataset_size, effective_batch_size):
                 end_idx = min(i + effective_batch_size, dataset_size)
                 batch_indices = indices[i:end_idx]
 
-                # === 使用subgraph优化的子图构建 ===
-                # 1. 确定minibatch对应的节点在state_datas中的全局索引
-                batch_indices_expanded = batch_indices.unsqueeze(1)  # [B, 1]
-                node_offsets = torch.arange(self.num_nodes, device=self.device).unsqueeze(0)  # [1, N]
-                subset_nodes_global = (batch_indices_expanded * self.num_nodes + node_offsets).view(-1)  # [B*N]
+                # 构建子图
+                batch_indices_expanded = batch_indices.unsqueeze(1)
+                node_offsets = torch.arange(self.num_nodes, device=self.device).unsqueeze(0)
+                subset_nodes_global = (batch_indices_expanded * self.num_nodes + node_offsets).view(-1)
 
-                # 2. 使用subgraph提取子图结构
                 sub_edge_index, _ = subgraph(
                     subset=subset_nodes_global,
                     edge_index=state_datas.edge_index,
@@ -814,22 +754,17 @@ class GNNPPOAgent:
                     num_nodes=state_datas.num_nodes
                 )
                 
-                # 3. 提取子图节点特征
                 sub_x = state_datas.x[subset_nodes_global]
-
-                # 4. 创建子图的batch向量 (向量化实现，避免循环)
                 batch_size = len(batch_indices)
                 sub_batch = torch.arange(batch_size, device=self.device).repeat_interleave(self.num_nodes)
 
-                # 5. 创建子批次Data对象
                 sub_batch_data = Data(
                     x=sub_x,
                     edge_index=sub_edge_index,
                     batch=sub_batch
                 )
-                # === 子图构建结束 ===
 
-                # 提取对应的动作、旧log probs、回报、优势
+                # 提取批次数据
                 batch_actions = actions[batch_indices]
                 batch_old_log_probs = old_log_probs[batch_indices]
                 batch_returns = returns_t[batch_indices]
@@ -838,112 +773,55 @@ class GNNPPOAgent:
                 # 评估动作
                 new_log_probs, node_values, entropy = self.policy.evaluate(sub_batch_data, batch_actions)
                 
-                # 使用global_mean_pool进行节点值聚合
-                values = global_mean_pool(node_values, sub_batch_data.batch)
-                values = values.squeeze(-1)
-
-                # === 向量化的PPO算法损失计算 ===
-                # 计算策略目标
-                ratio = torch.exp(new_log_probs - batch_old_log_probs)
+                # 修复价值聚合 - 确保每个样本对应一个价值
+                if node_values.dim() == 2 and node_values.size(0) == batch_size * self.num_nodes:
+                    # 重塑并计算每个图的平均值
+                    node_values_reshaped = node_values.view(batch_size, self.num_nodes, -1)
+                    values = node_values_reshaped.mean(dim=1).squeeze(-1)
+                else:
+                    # 使用global_mean_pool作为备选
+                    values = global_mean_pool(node_values, sub_batch_data.batch)
+                    values = values.squeeze(-1)
                 
-                # 向量化的clip操作
+                # 确保维度匹配
+                assert values.size(0) == batch_size, f"Value size mismatch: {values.size(0)} vs {batch_size}"                # PPO损失计算
+                ratio = torch.exp(new_log_probs - batch_old_log_probs)
                 surr1 = ratio * batch_advantages
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * batch_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
                 
-                # 获取旧的值估计
-                batch_old_values = values_t[batch_indices]
-                
-                # 实现值函数裁剪，防止值函数更新过大导致训练不稳定
-                value_pred_clipped = batch_old_values + torch.clamp(
-                    values - batch_old_values, -self.clip_ratio, self.clip_ratio
-                )
-                # 计算两种值损失并取最大值，类似于PPO策略裁剪
-                value_losses = (values - batch_returns).pow(2)
-                value_losses_clipped = (value_pred_clipped - batch_returns).pow(2)
-                value_loss = 0.5 * torch.max(value_losses, value_losses_clipped).mean()
+                # 简化价值损失计算
+                value_loss = F.mse_loss(values, batch_returns)
 
                 # 总损失
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy.mean()
                 
-                # 优化 - 使用梯度累积减少同步点
-                self.optimizer.zero_grad(set_to_none=True)  # 使用set_to_none=True减少内存使用
+                # 检查损失的数值稳定性
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"[错误] 检测到NaN/Inf损失: {loss.item()}")
+                    continue
+                
+                # 优化
+                self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 
-                # 检查是否有梯度异常 (NaN或Inf)
-                if self.enable_health_check and self.current_episode % self.health_check_freq == 0:
-                    has_nan_grad = False
-                    max_grad_norm = 0.0
-                    for name, param in self.policy.named_parameters():
-                        if param.grad is not None:
-                            grad_norm = param.grad.norm().item()
-                            max_grad_norm = max(max_grad_norm, grad_norm)
-                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                                print(f"[Warning] NaN/Inf gradient detected in {name}")
-                                has_nan_grad = True
-                    
-                    if has_nan_grad:
-                        print("[Warning] NaN/Inf gradients found, skipping this update")
-                        self.optimizer.zero_grad()
-                        continue
-                    
-                    if max_grad_norm > 10.0:  # 通常认为梯度范数超过10是很大的
-                        print(f"[Warning] Large gradient norm: {max_grad_norm:.4f}")
-                
-                # 使用原地操作进行梯度裁剪
+                # 记录梯度统计
+                total_grad_norm = 0
+                for name, param in self.policy.named_parameters():
+                    if param.grad is not None:
+                        param_norm = param.grad.data.norm(2)
+                        total_grad_norm += param_norm.item() ** 2                
+                        total_grad_norm = total_grad_norm ** (1. / 2)
+                # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.max_grad_norm)
                 self.optimizer.step()
                 
                 total_loss += loss.item()
                 update_rounds += 1
 
-                # TensorBoard记录 (低频率记录以减少同步)
-                if self.logger is not None and update_rounds % 5 == 0:
-                    self.logger.log_episode(
-                        self.rewards,
-                        loss.item(),
-                        entropy.mean().item(),
-                        value_loss.item(),
-                        policy_loss.item()
-                    )
-                    
-                    # 额外记录嵌入统计信息到TensorBoard
-                    if self.enable_health_check and self.current_episode % self.health_check_freq == 0:
-                        for key, value_list in self.policy.embedding_stats_history.items():
-                            if value_list:  # 确保列表非空
-                                self.logger.log_scalar(f"embedding/{key}", value_list[-1], self.current_episode)        # 关闭统计收集
-        if self.enable_grad_check:
-            self.policy.collect_stats = False
-            
-        # 如果有更新发生，并且有数据，执行更新后的健康检查
-        if update_rounds > 0 and len(self.states) > 0:
-            # 为了健康检查，获取最后一个状态的数据
-            last_state = self.states[-1]
-            state_data = self._state_to_pyg_data(last_state)
-            self.perform_health_check(state_data, 'after_update')
-
-        # 清空缓冲区并报告时间
+        # 清空缓冲区
         self._clear_buffers()
         self.update_time += time.time() - start
-        
-        # 每隔一段时间清除缓存以防止内存泄漏
-        if hasattr(self, 'state_cache') and len(self.state_cache) > 1000:
-            self.state_cache.clear()
-        
-        # 应用学习率调度器，使用当前episode的平均奖励来调整学习率
-        if self.use_lr_scheduler and len(self.rewards) > 0 and update_rounds > 0:
-            avg_reward = sum(self.rewards) / len(self.rewards)
-            # 对于学习率调度器，使用平均奖励作为指标（因为我们想最大化奖励）
-            self.lr_scheduler.step(avg_reward)
-            
-            # 记录当前学习率
-            current_lr = self.optimizer.param_groups[0]['lr']
-            if self.logger is not None:
-                self.logger.log_scalar("training/learning_rate", current_lr, self.current_episode)
-                
-            # 打印当前学习率（每10个episode一次）
-            if self.current_episode % 10 == 0:
-                print(f"当前学习率: {current_lr:.6f}")
         
         return total_loss / max(1, update_rounds)
 
@@ -1077,111 +955,29 @@ class GNNPPOAgent:
     def train_mode(self):
         """设置为训练模式"""
         self.policy.train()    
+    
     def perform_health_check(self, state_data, check_point):
-        """执行健康检查
-        
-        Args:
-            state_data: PyG数据对象，用于健康检查
-            check_point: 检查点类型，例如'episode_start', 'episode_end', 'after_update'
-        """
+        """确保正确收集和显示嵌入统计信息"""
         if not self.enable_health_check or self.current_episode % self.health_check_freq != 0:
             return False
             
         # 检查是否已在当前episode的该检查点执行过检查
-        if self.health_check_states[check_point]:
+        if self.health_check_states.get(check_point, False):
             return False
             
         # 标记该检查点已执行检查
         self.health_check_states[check_point] = True
         
-        # 开始收集统计
+        # 激活统计收集
         self.policy.collect_stats = True
         
-        # 确保一次前向传播以收集统计数据
+        # 强制进行一次前向传播以收集统计数据
         with torch.no_grad():
-            # 使用select_action_and_log_prob来获取更详细的信息
-            _, _, _, logits, probs = self.policy.select_action_and_log_prob(state_data)
-            
-            # 分析logits（softmax之前的值）
-            logits_mean = logits.mean().item()
-            logits_std = logits.std().item()
-            logits_min = logits.min().item()
-            logits_max = logits.max().item()
-            
-            # 分析输出概率
-            probs_mean = probs.mean().item()
-            probs_std = probs.std().item()
-            probs_min = probs.min().item()
-            probs_max = probs.max().item()
-              # 检查Actor网络最后一个线性层的权重和偏置
-            last_linear_layer = None
-            
-            # 更严格地查找最后一个线性层 (排除softmax后面的层)
-            found_softmax = False
-            for module in reversed(list(self.policy.actor)):
-                if isinstance(module, nn.Softmax):
-                    found_softmax = True
-                elif isinstance(module, nn.Linear) and not found_softmax:
-                    last_linear_layer = module
-                    break
-            
-            # 如果没找到，再尝试查找任何线性层
-            if last_linear_layer is None:
-                for module in reversed(list(self.policy.actor)):
-                    if isinstance(module, nn.Linear):
-                        last_linear_layer = module
-                        break
-                        
-            if last_linear_layer is not None:
-                weights = last_linear_layer.weight.detach()
-                biases = last_linear_layer.bias.detach() if last_linear_layer.bias is not None else None
-                
-                # 计算权重和偏置的统计信息
-                weights_mean = weights.mean().item()
-                weights_std = weights.std().item()
-                weights_norm = weights.norm().item()
-                
-                # 如果分区数为2，计算两个分区对应的权重向量之间的差异
-                if self.num_partitions == 2 and weights.size(0) == 2:
-                    weight_diff = (weights[0] - weights[1]).abs().mean().item()
-                    
-                    if biases is not None:
-                        bias_diff = abs(biases[0].item() - biases[1].item())
-                    else:
-                        bias_diff = 0.0
-            
-            # 打印详细的诊断信息
-            print(f"\n[Episode {self.current_episode} - {check_point}] GNN健康状态检查:")
-            print("===== Actor 网络输出检查 =====")
-            print(f"Logits 统计: 均值={logits_mean:.4f}, 标准差={logits_std:.4f}, 最小值={logits_min:.4f}, 最大值={logits_max:.4f}")
-            print(f"Probs 统计: 均值={probs_mean:.4f}, 标准差={probs_std:.4f}, 最小值={probs_min:.4f}, 最大值={probs_max:.4f}")
-            
-            if last_linear_layer is not None:
-                print("\n===== Actor 最后一层线性层检查 =====")
-                print(f"权重统计: 均值={weights_mean:.4f}, 标准差={weights_std:.4f}, 范数={weights_norm:.4f}")
-                
-                if self.num_partitions == 2 and weights.size(0) == 2:
-                    print(f"两个分区权重向量的平均绝对差: {weight_diff:.6f}")
-                    if biases is not None:
-                        print(f"两个分区偏置的绝对差: {bias_diff:.6f}")
-                        print(f"偏置值: [{biases[0].item():.6f}, {biases[1].item():.6f}]")
-            
-            # 为两个分区的情况，直接打印整个权重矩阵和偏置值
-            if self.num_partitions == 2 and weights.size(0) == 2:
-                print("\n完整权重矩阵:")
-                print(weights.cpu().numpy())
-                
-                if biases is not None:
-                    print("\n完整偏置向量:")
-                    print(biases.cpu().numpy())
+            action_probs, values = self.policy.forward(state_data)
         
         # 打印嵌入统计信息
         self.policy.print_embedding_stats(self.current_episode)
         
-        # 如果开启了嵌入可视化并且到了可视化周期
-        if self.enable_embedding_vis and self.current_episode % self.vis_freq == 0:
-            self.policy.visualize_embeddings(state_data, self.current_episode)
-            
         # 关闭统计收集
         self.policy.collect_stats = False
         

@@ -821,16 +821,17 @@ def run_quick_health_check(episodes=50, max_steps=100, num_nodes=20, num_partiti
         "episodes": episodes,
         "max_steps": max_steps,
         "gnn_ppo_config": {
-            "hidden_dim": 64,  # 减小隐藏维度以加快运行速度
-            "learning_rate": 0.0003,
+            "hidden_dim": 32,  # 减小隐藏维度以加快运行速度
+            "learning_rate": 0.0001,
             "gamma": 0.99,
             "gae_lambda": 0.95,
-            "clip_ratio": 0.2,
-            "ppo_epochs": 4,
+            "clip_ratio": 0.1,
+            "ppo_epochs": 3,
             "batch_size": 32,
             "n_steps": 128,
             "entropy_coef": 0.01,
             "value_coef": 0.5,
+            "max_grad_norm": 0.3,  # 保持严格的梯度裁剪
         },
         # 健康检查设置
         "enable_health_check": True,

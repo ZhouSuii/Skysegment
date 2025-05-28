@@ -70,18 +70,25 @@ class GraphPartitionEnvironment(gym.Env):
 
 
     def _get_state(self):
-        # 状态组成：one-hot 分区、归一化节点度、归一化节点权重
-        # Shape = [self.num_nodes, self.num_partitions + 2] -> 分区 + 度 + 权重
+        """改进状态表示，确保特征有足够区分度"""
+        # 状态组成：one-hot 分区、归一化节点度、原始节点权重
         state = np.zeros((self.num_nodes, self.num_partitions + 2), dtype=np.float32)
-        max_weight = np.max(self.node_weights) if len(self.node_weights) > 0 else 1.0
-        normalized_weights = self.node_weights / max_weight
-
+        
+        # One-hot编码分区分配
         for i in range(self.num_nodes):
             state[i, self.partition_assignment[i]] = 1.0
-            # 将归一化的节点度和权重存储在最后两列
+        
+        # 添加节点权重（不要过度归一化）
+        max_weight = np.max(self.node_weights) if len(self.node_weights) > 0 else 1.0
+        if max_weight > 0:
+            normalized_weights = self.node_weights / max_weight
+        else:
+            normalized_weights = np.ones_like(self.node_weights)
+        
+        # 添加节点度（归一化）
+        for i in range(self.num_nodes):
             state[i, self.num_partitions] = self.node_degrees[i]
             state[i, self.num_partitions + 1] = normalized_weights[i]
-
         return state
 
     # 新方法：计算给定分区分配状态的势能
