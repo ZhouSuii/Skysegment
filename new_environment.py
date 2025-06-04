@@ -48,9 +48,8 @@ class GraphPartitionEnvironment(gym.Env):
         self.potential_weights = potential_weights if potential_weights is not None else default_weights
 
         # Pre-calculate normalization factors for potential function metrics (optional but recommended)
-        self._total_weight_sq = np.sum(self.node_weights)**2 + 1e-6 # For normalizing variance
-        self._total_edges = len(self.graph.edges()) + 1e-6 # For normalizing edge cut
-        # Modularity is already normalized to [-1, 1]
+        self._total_weight_sq = np.sum(self.node_weights)**2 + 1e-6
+        self._total_edges = len(self.graph.edges()) + 1e-6
 
 
     def reset(self, seed=None):
@@ -94,32 +93,72 @@ class GraphPartitionEnvironment(gym.Env):
     # 新方法：计算给定分区分配状态的势能
     def _calculate_potential(self, partition_assignment):
         """
-        Calculates the potential function value for a given partition assignment.
-        Φ(s) = -w_var * NormalizedVariance(s) - w_cut * NormalizedEdgeCut(s) + w_mod * Modularity(s)
-        Higher potential is better.
+        分层势函数设计：优先满足约束条件，然后优化目标
+        
+        Φ(s) = Φ_constraint(s) + Φ_objective(s)
+        
+        其中：
+        - Φ_constraint(s): 确保合法分区分配（负值惩罚违规）
+        - Φ_objective(s): 在满足约束的基础上优化质量指标
         """
-        # 确保分区分配索引有效 (防御性编程)
+        # 确保分区分配索引有效（防御性编程）
         valid_indices = np.all([(pa >= 0 and pa < self.num_partitions) for pa in partition_assignment])
         if not valid_indices:
-            # 若新方法：计算给定分区分配状态的势能
-             return -1e9
+            return -1e9
 
+        # 第1层：约束条件检查
+        constraint_potential = self._calculate_constraint_potential(partition_assignment)
+        
+        # 第2层：目标优化（只有在约束满足时才起作用）
+        objective_potential = self._calculate_objective_potential(partition_assignment)
+        
+        # 分层权重：约束条件权重更高
+        total_potential = 10.0 * constraint_potential + 1.0 * objective_potential
+        
+        return total_potential
+    
+    def _calculate_constraint_potential(self, partition_assignment):
+        """计算约束条件势函数：确保分区平衡和连通性"""
+        constraint_score = 0.0
+        
+        # 约束1：分区平衡性 - 每个分区至少要有一个节点
+        partition_counts = np.bincount(partition_assignment, minlength=self.num_partitions)
+        empty_partitions = np.sum(partition_counts == 0)
+        
+        if empty_partitions > 0:
+            # 严重惩罚空分区
+            constraint_score -= 100.0 * empty_partitions
+        
+        # 约束2：分区大小不应过于不均衡
+        mean_partition_size = self.num_nodes / self.num_partitions
+        max_imbalance = np.max(np.abs(partition_counts - mean_partition_size)) / mean_partition_size
+        
+        if max_imbalance > 0.5:  # 允许50%的不平衡
+            constraint_score -= 10.0 * (max_imbalance - 0.5)
+        
+        # 约束3：确保每个分区内部连通（可选）
+        # 这里暂时跳过，因为计算复杂度较高
+        
+        return constraint_score
+    
+    def _calculate_objective_potential(self, partition_assignment):
+        """计算目标优化势函数：权重方差、边切割、模块度"""
         # 使用 metrics.py 中的辅助函数计算指标
         variance = calculate_weight_variance(self.graph, partition_assignment, self.num_partitions)
         edge_cut = calculate_edge_cut(self.graph, partition_assignment)
         modularity = calculate_modularity(self.graph, partition_assignment, self.num_partitions)
 
-        # Normalize metrics
-        normalized_variance = variance / self._total_weight_sq # Normalize by total weight squared
-        normalized_edge_cut = edge_cut / self._total_edges # Normalize by total edges
-
-        # 根据权重计算势能（假设权重为正）
-        # 希望低方差、低切割、高模块度 -> 对 方差/切割 使用负号
-        potential = -self.potential_weights.get('variance', 1.0) * normalized_variance \
-                    -self.potential_weights.get('edge_cut', 1.0) * normalized_edge_cut \
-                    +self.potential_weights.get('modularity', 1.0) * modularity
+        # 渐进式归一化：避免极端值主导
+        normalized_variance = np.tanh(variance / self._total_weight_sq)  # 使用tanh限制范围
+        normalized_edge_cut = np.tanh(edge_cut / self._total_edges)      # 使用tanh限制范围
+        normalized_modularity = np.tanh(modularity)                      # 模块度已在[-1,1]范围
         
-        return potential
+        # 目标函数：希望低方差、低切割、高模块度
+        objective_potential = (-self.potential_weights.get('variance', 1.0) * normalized_variance 
+                             - self.potential_weights.get('edge_cut', 1.0) * normalized_edge_cut 
+                             + self.potential_weights.get('modularity', 1.0) * normalized_modularity)
+        
+        return objective_potential
 
 
     def step(self, action):

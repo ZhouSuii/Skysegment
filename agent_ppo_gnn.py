@@ -8,6 +8,7 @@ from torch_geometric.nn import GCNConv, global_mean_pool
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import subgraph
 import time  # 添加 time 模块用于性能分析
+import math
 
 
 # GNN-PPO策略网络
@@ -15,29 +16,43 @@ class GNNPPOPolicy(nn.Module):
     def __init__(self, node_features, hidden_dim, output_dim, num_partitions):
         super(GNNPPOPolicy, self).__init__()
         self.num_partitions = num_partitions
+        self.hidden_dim = hidden_dim
 
         # 简化网络结构，减少过拟合和梯度消失
-        self.conv1 = GCNConv(node_features, hidden_dim // 2)  # 减小隐藏层维度
-        self.conv2 = GCNConv(hidden_dim // 2, hidden_dim // 2)
+        self.conv1 = GCNConv(node_features, hidden_dim)  # 减小隐藏层维度
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
         
-        # 移除LayerNorm，简化网络结构
         self.dropout = nn.Dropout(0.1)
         
-        # 简化Actor网络，直接输出logits，移除Softmax
-        self.actor = nn.Sequential(
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim // 4, output_dim)
-            # 移除Softmax，在外部计算
+        # 添加注意力机制用于价值聚合
+        self.attention_dim = hidden_dim // 8
+        self.value_attention = nn.Sequential(
+            nn.Linear(hidden_dim, self.attention_dim),
+            nn.Tanh(),
+            nn.Linear(self.attention_dim, 1)
         )
         
-        # 简化Critic网络
-        self.critic = nn.Sequential(
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+        # 添加注意力机制用于动作选择
+        self.action_attention = nn.Sequential(
+            nn.Linear(hidden_dim, self.attention_dim),
+            nn.Tanh(),
+            nn.Linear(self.attention_dim, 1)
+        )
+        
+        # 简化Actor网络，输出节点级别的分区logits
+        self.actor = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim // 4, 1)
+            nn.Linear(hidden_dim // 2, num_partitions)  # 输出每个节点对应num_partitions个分区的logits
+        )
+        
+        # 简化Critic网络，输出节点级别的价值
+        self.critic = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 2, 1)
         )
         
         # 使用Xavier初始化改善权重初始化
@@ -67,10 +82,11 @@ class GNNPPOPolicy(nn.Module):
             if hasattr(module, 'lin') and module.lin is not None:
                 nn.init.xavier_uniform_(module.lin.weight, gain=1.0)
                 if hasattr(module.lin, 'bias') and module.lin.bias is not None:
-                    nn.init.zeros_(module.lin.bias)
-
+                    nn.init.zeros_(module.lin.bias)  
+                      
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
+        batch = getattr(data, 'batch', None)
         
         # GNN前向传播
         x1 = F.relu(self.conv1(x, edge_index))
@@ -78,20 +94,83 @@ class GNNPPOPolicy(nn.Module):
         x2 = F.relu(self.conv2(x1, edge_index)) 
         x2 = self.dropout(x2)
         
-        # Actor和Critic输出
-        logits = self.actor(x2)
-        values = self.critic(x2)
-        action_probs = F.softmax(logits, dim=-1)
+        # 收集统计信息（如果开启）
+        if self.collect_stats:
+            self._collect_embedding_stats(x1, x2, x2, x2)
         
-        return logits, values, action_probs
-
+        # Actor输出：节点级别的分区logits
+        node_logits = self.actor(x2)  # [num_nodes, num_partitions]
+        
+        # Critic输出：节点级别的价值
+        node_values = self.critic(x2)  # [num_nodes, 1]
+        
+        # 使用注意力机制聚合价值
+        if batch is not None:
+            # 批处理模式：使用注意力聚合每个图的价值
+            attention_weights = self.value_attention(x2)  # [num_nodes, 1]
+            attention_weights = torch.softmax(attention_weights, dim=0)
+            
+            # 按批次聚合价值
+            aggregated_values = global_mean_pool(node_values * attention_weights, batch)
+        else:
+            # 单图模式：直接计算注意力权重
+            attention_weights = F.softmax(self.value_attention(x2), dim=0)
+            aggregated_values = torch.sum(node_values * attention_weights, dim=0, keepdim=True)
+        
+        return node_logits, aggregated_values, node_values    
     def evaluate(self, data, action):
-        logits, values, action_probs = self.forward(data)
-        action_probs_flat = action_probs.view(-1)
-        dist = Categorical(action_probs_flat)
-        action_log_probs = dist.log_prob(action)
-        entropy = dist.entropy()
-        return action_log_probs, values, entropy
+        """评估给定动作的对数概率、价值和熵"""
+        node_logits, aggregated_values, node_values = self.forward(data)
+        batch = getattr(data, 'batch', None)
+        
+        # 解码动作：从扁平化动作空间恢复到(node_idx, partition)
+        if batch is not None:
+            # 批处理模式
+            batch_size = batch.max().item() + 1
+            num_nodes_per_graph = node_logits.size(0) // batch_size
+            
+            # 解码动作
+            node_indices = action // self.num_partitions
+            partition_indices = action % self.num_partitions
+            
+            # 重塑node_logits为[batch_size, num_nodes, num_partitions]
+            node_logits_reshaped = node_logits.view(batch_size, num_nodes_per_graph, self.num_partitions)
+            
+            # 计算每个动作的对数概率
+            log_probs = []
+            for i in range(batch_size):
+                node_idx = node_indices[i]
+                partition_idx = partition_indices[i]
+                node_logit = node_logits_reshaped[i, node_idx, :]
+                dist = Categorical(logits=node_logit)
+                log_prob = dist.log_prob(partition_idx)
+                log_probs.append(log_prob)
+            
+            action_log_probs = torch.stack(log_probs)
+            
+            # 计算熵
+            entropies = []
+            for i in range(batch_size):
+                node_idx = node_indices[i]
+                node_logit = node_logits_reshaped[i, node_idx, :]
+                dist = Categorical(logits=node_logit)
+                entropy = dist.entropy()
+                entropies.append(entropy)
+            
+            entropy = torch.stack(entropies)
+            
+        else:
+            # 单图模式
+            node_idx = action // self.num_partitions
+            partition_idx = action % self.num_partitions
+            
+            # 获取对应节点的logits
+            node_logit = node_logits[node_idx, :]
+            dist = Categorical(logits=node_logit)
+            action_log_probs = dist.log_prob(partition_idx)
+            entropy = dist.entropy()
+        
+        return action_log_probs, aggregated_values, entropy
     
     def _collect_embedding_stats(self, layer1_out, layer2_out, actor_out, critic_out):
         """修复统计信息收集，确保正确存储到embedding_stats_history中"""
@@ -210,59 +289,85 @@ class GNNPPOPolicy(nn.Module):
                 plt.colorbar(label='Node Index')
                 plt.title(f'Layer 2 Embedding Visualization - Episode {episode}')
                 plt.savefig(f"{output_dir}/layer2_ep{episode}.png")
-                plt.close()
-
+                plt.close()    
     def act_batch(self, batch_data):
-        """批量处理状态并返回动作，大幅减少CPU-GPU传输"""
+        """批量处理状态并返回动作，使用注意力机制"""
         with torch.no_grad():
-            action_probs, values = self.forward(batch_data)
-            action_probs_flat = action_probs.view(-1)
+            node_logits, aggregated_values, node_values = self.forward(batch_data)
             
-            dist = Categorical(action_probs_flat)
-            actions = dist.sample()
-            action_log_probs = dist.log_prob(actions)
+            # 对于批量处理，我们需要为每个图选择一个节点和分区
+            batch_size = batch_data.batch.max().item() + 1 if hasattr(batch_data, 'batch') else 1
+            num_nodes_per_graph = node_logits.size(0) // batch_size
+            
+            actions = []
+            action_log_probs = []
+            
+            for i in range(batch_size):
+                # 获取当前图的节点logits
+                start_idx = i * num_nodes_per_graph
+                end_idx = (i + 1) * num_nodes_per_graph
+                graph_node_logits = node_logits[start_idx:end_idx, :]
+                
+                # 使用简化的节点选择策略（可以后续改进）
+                # 随机选择一个节点
+                selected_node = torch.randint(0, num_nodes_per_graph, (1,))
+                
+                # 为选中的节点选择分区
+                node_logit = graph_node_logits[selected_node, :]
+                dist = Categorical(logits=node_logit.squeeze())
+                selected_partition = dist.sample()
+                
+                # 计算扁平化动作
+                action = selected_node * self.num_partitions + selected_partition
+                action_log_prob = dist.log_prob(selected_partition)
+                
+                actions.append(action)
+                action_log_probs.append(action_log_prob)
+            
+            actions = torch.stack(actions)
+            action_log_probs = torch.stack(action_log_probs)
             
             # 返回动作、对数概率和价值估计 - 保持结构一致
-            return actions.detach().cpu(), action_log_probs.detach().cpu(), values.detach().cpu()    
-    def act(self, data):
-        """根据当前状态选择动作"""
-        with torch.no_grad():  # 【优化6】确保使用torch.no_grad()减少内存占用
-            action_probs, node_values = self.forward(data)
-            action_probs_flat = action_probs.view(-1)
-
-            # 创建动作分布并采样
-            dist = Categorical(action_probs_flat)
-            action = dist.sample()
-            action_log_prob = dist.log_prob(action)
-
-            return action.item(), action_log_prob, node_values
+            return actions.detach().cpu(), action_log_probs.detach().cpu(), aggregated_values.detach().cpu()    
     def select_action_and_log_prob(self, data):
-        """根据当前状态选择动作，返回原始logits和概率等信息"""
+        """智能节点选择策略，选择最有潜力的节点进行分区调整"""
         with torch.no_grad():
+            node_logits, aggregated_values, node_values = self.forward(data)
+            
+            # 获取GNN处理后的节点特征
             x, edge_index = data.x, data.edge_index
-
-            # 使用简化的GNN结构（与forward方法保持一致）
-            x = F.relu(self.conv1(x, edge_index))
-            x = self.dropout(x)
-            x = F.relu(self.conv2(x, edge_index))
-            x = self.dropout(x)
+            x1 = F.relu(self.conv1(x, edge_index))
+            x1 = self.dropout(x1)
+            x2 = F.relu(self.conv2(x1, edge_index))
+            x2 = self.dropout(x2)
             
-            # 获取actor的logits（softmax之前的输出）
-            logits = self.actor(x)
+            # 策略1：基于注意力的节点选择
+            attention_scores = self.action_attention(x2)
+            attention_weights = F.softmax(attention_scores.squeeze(-1), dim=0)
             
-            # 计算动作概率
-            action_probs = F.softmax(logits, dim=-1)
-            action_probs_flat = action_probs.view(-1)
+            # 策略2：基于价值方差的节点选择
+            value_variance = torch.var(node_values.squeeze(-1))
             
-            # 获取critic的输出
-            values = self.critic(x)
+            # 策略3：基于分区置信度的节点选择
+            partition_probs = F.softmax(node_logits, dim=-1)
+            partition_entropy = -torch.sum(partition_probs * torch.log(partition_probs + 1e-8), dim=-1)
             
-            # 创建动作分布并采样
-            dist = Categorical(action_probs_flat)
-            action = dist.sample()
-            action_log_prob = dist.log_prob(action)
+            # 综合选择策略：优先选择注意力权重高且置信度低的节点
+            selection_scores = attention_weights + 0.5 * partition_entropy
             
-            return action.item(), action_log_prob, values, logits, action_probs
+            # 选择得分最高的节点
+            selected_node = torch.argmax(selection_scores)
+            
+            # 为选中的节点选择分区
+            node_logit = node_logits[selected_node, :]
+            dist = Categorical(logits=node_logit)
+            selected_partition = dist.sample()
+            
+            # 计算扁平化动作
+            action = selected_node * self.num_partitions + selected_partition
+            action_log_prob = dist.log_prob(selected_partition)
+            
+            return action.item(), action_log_prob, aggregated_values
 
 # GNN-PPO智能体
 class GNNPPOAgent:
@@ -647,7 +752,7 @@ class GNNPPOAgent:
         return Batch.from_data_list(batch_data_list).to(self.device)
 
     def act(self, state):
-        """根据当前状态选择动作"""
+        """根据当前状态选择动作，使用智能节点选择策略"""
         start = time.time()
         
         # 将状态转换为PyG数据
@@ -659,25 +764,19 @@ class GNNPPOAgent:
         # 在episode开始时执行健康检查
         self.perform_health_check(state_data, 'episode_start')
             
-        with torch.no_grad():
-            action_probs, node_values = self.policy(state_data)
-            action_probs_flat = action_probs.view(-1)
-
-            # 创建动作分布并采样
-            dist = Categorical(action_probs_flat)
-            action = dist.sample()
-            action_log_prob = dist.log_prob(action)
-            
-            value = node_values.mean().item()  # 使用所有节点值的平均作为状态价值
-            self.forward_time += time.time() - conversion_end
+        # 使用策略网络的智能节点选择
+        action, action_log_prob, aggregated_value = self.policy.select_action_and_log_prob(state_data)
+        
+        value = aggregated_value.mean().item()  # 使用聚合后的价值
+        self.forward_time += time.time() - conversion_end
 
         # 存储当前轨迹信息
         self.states.append(state)
-        self.actions.append(action.item())
+        self.actions.append(action)
         self.log_probs.append(action_log_prob)
         self.values.append(value)
         
-        return action.item(), action_log_prob, value
+        return action, action_log_prob, value
 
     def store_transition(self, reward, done):
         """修复奖励归一化，避免数值不稳定"""
@@ -768,23 +867,18 @@ class GNNPPOAgent:
                 batch_actions = actions[batch_indices]
                 batch_old_log_probs = old_log_probs[batch_indices]
                 batch_returns = returns_t[batch_indices]
-                batch_advantages = advantages_t[batch_indices]
-
-                # 评估动作
-                new_log_probs, node_values, entropy = self.policy.evaluate(sub_batch_data, batch_actions)
+                batch_advantages = advantages_t[batch_indices]                # 评估动作
+                new_log_probs, aggregated_values, entropy = self.policy.evaluate(sub_batch_data, batch_actions)
                 
-                # 修复价值聚合 - 确保每个样本对应一个价值
-                if node_values.dim() == 2 and node_values.size(0) == batch_size * self.num_nodes:
-                    # 重塑并计算每个图的平均值
-                    node_values_reshaped = node_values.view(batch_size, self.num_nodes, -1)
-                    values = node_values_reshaped.mean(dim=1).squeeze(-1)
-                else:
-                    # 使用global_mean_pool作为备选
-                    values = global_mean_pool(node_values, sub_batch_data.batch)
-                    values = values.squeeze(-1)
+                # aggregated_values已经是聚合后的价值，直接使用
+                values = aggregated_values.squeeze(-1) if aggregated_values.dim() > 1 else aggregated_values
                 
                 # 确保维度匹配
-                assert values.size(0) == batch_size, f"Value size mismatch: {values.size(0)} vs {batch_size}"                # PPO损失计算
+                batch_size = len(batch_indices)
+                if values.dim() == 0:
+                    values = values.unsqueeze(0)
+                    
+                assert values.size(0) == batch_size, f"Value size mismatch: {values.size(0)} vs {batch_size}"# PPO损失计算
                 ratio = torch.exp(new_log_probs - batch_old_log_probs)
                 surr1 = ratio * batch_advantages
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * batch_advantages
@@ -834,15 +928,13 @@ class GNNPPOAgent:
         values_t = torch.tensor(self.values, dtype=torch.float32, device=self.device)
         
         # 计算下一个状态的值
-        next_value_t = torch.tensor(0.0, dtype=torch.float32, device=self.device)
-    
-        # 如果最后一个状态不是终止状态，计算其值
+        next_value_t = torch.tensor(0.0, dtype=torch.float32, device=self.device)        # 如果最后一个状态不是终止状态，计算其值
         if not self.dones[-1]:
             # 获取最后一个状态并转换为PyG数据
             last_state = self.states[-1]
             with torch.no_grad():
                 state_data = self._state_to_pyg_data(last_state)
-                _, last_values = self.policy(state_data)
+                _, last_values, _ = self.policy(state_data)  # 解包3个值，只使用聚合价值
                 next_value_t = last_values.mean().item()  # 使用平均值作为状态值
         
         # 添加下一个状态值到values序列末尾 - 确保维度匹配
@@ -879,13 +971,13 @@ class GNNPPOAgent:
         advantages = []
         gae = 0
 
-        # 获取下一个状态的值估计
+        # 获取下一个状态的值估计        
         with torch.no_grad():
             if self.dones[-1]:
                 next_value = 0
             else:
                 next_state_data = self._state_to_pyg_data(self.states[-1])
-                _, values = self.policy(next_state_data)
+                _, values, _ = self.policy(next_state_data)  # 解包3个值，只使用聚合价值
                 next_value = values.mean().item()
 
         values_copy = self.values.copy()  # 创建副本以存储原始值函数估计
@@ -970,10 +1062,9 @@ class GNNPPOAgent:
         
         # 激活统计收集
         self.policy.collect_stats = True
-        
-        # 强制进行一次前向传播以收集统计数据
+          # 强制进行一次前向传播以收集统计数据
         with torch.no_grad():
-            action_probs, values = self.policy.forward(state_data)
+            node_logits, aggregated_values, node_values = self.policy.forward(state_data)
         
         # 打印嵌入统计信息
         self.policy.print_embedding_stats(self.current_episode)
