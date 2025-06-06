@@ -3,8 +3,6 @@
 /plugins
 /cache
 /scenario/ic.scn
-/bluesky/resources/grib
-/bluesky/resources/netcdf
 /bluesky
 /results
 /runs
@@ -14,6 +12,9 @@
 *.sqlite
 *.db
 /.github
+*.zip
+/2024-11-11
+/.cursor
 
 # Potentially locally-copied BADA installation
 /bluesky/resources/performance/BADA/*

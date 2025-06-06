@@ -52,7 +52,13 @@ class GraphPartitionEnvironment(gym.Env):
         self._total_edges = len(self.graph.edges()) + 1e-6
 
 
-    def reset(self, seed=None):
+    def reset(self, seed=None, state_format='matrix'):
+        """
+        重置环境
+        Args:
+            seed: 随机种子
+            state_format: 'matrix' 用于传统方法, 'graph' 用于GNN方法
+        """
         if seed is not None:
             super().reset(seed=seed) # Use gymnasium's reset seed
         else:
@@ -65,7 +71,7 @@ class GraphPartitionEnvironment(gym.Env):
         self.current_step = 0
 
         # Return initial state and info
-        return self._get_state(), {}
+        return self.get_state(format=state_format), {}
 
 
     def _get_state(self):
@@ -89,6 +95,69 @@ class GraphPartitionEnvironment(gym.Env):
             state[i, self.num_partitions] = self.node_degrees[i]
             state[i, self.num_partitions + 1] = normalized_weights[i]
         return state
+
+    # === 新增：为GNN返回图结构数据的方法 ===
+    def _get_graph_state(self):
+        """
+        为GNN智能体返回图结构数据格式
+        返回包含节点特征、边索引和分区信息的字典
+        """
+        import torch
+        
+        # 1. 构建节点特征矩阵
+        node_features = np.zeros((self.num_nodes, self.num_partitions + 2), dtype=np.float32)
+        
+        # One-hot编码当前分区分配
+        for i in range(self.num_nodes):
+            node_features[i, self.partition_assignment[i]] = 1.0
+        
+        # 添加节点度（归一化）
+        node_features[:, self.num_partitions] = self.node_degrees
+        
+        # 添加节点权重（归一化）
+        max_weight = np.max(self.node_weights) if len(self.node_weights) > 0 else 1.0
+        if max_weight > 0:
+            normalized_weights = self.node_weights / max_weight
+        else:
+            normalized_weights = np.ones_like(self.node_weights)
+        node_features[:, self.num_partitions + 1] = normalized_weights
+        
+        # 2. 构建边索引 (edge_index)
+        edges = list(self.graph.edges())
+        if len(edges) > 0:
+            # 创建无向图的边索引（每条边两个方向）
+            edge_list = []
+            for u, v in edges:
+                edge_list.append([u, v])
+                edge_list.append([v, u])  # 反向边
+            edge_index = np.array(edge_list, dtype=np.int64).T  # 转置为 [2, num_edges]
+        else:
+            # 如果没有边，创建空的边索引
+            edge_index = np.zeros((2, 0), dtype=np.int64)
+        
+        # 3. 当前分区分配
+        current_partition = self.partition_assignment.copy()
+        
+        # 返回图结构数据
+        graph_data = {
+            'node_features': torch.tensor(node_features, dtype=torch.float32),
+            'edge_index': torch.tensor(edge_index, dtype=torch.long),
+            'current_partition': torch.tensor(current_partition, dtype=torch.long)
+        }
+        
+        return graph_data
+
+    # === 修改：支持两种状态格式的统一接口 ===
+    def get_state(self, format='matrix'):
+        """
+        统一的状态获取接口
+        Args:
+            format: 'matrix' 用于传统方法, 'graph' 用于GNN方法
+        """
+        if format == 'graph':
+            return self._get_graph_state()
+        else:
+            return self._get_state()
 
     # 新方法：计算给定分区分配状态的势能
     def _calculate_potential(self, partition_assignment):
@@ -205,6 +274,7 @@ class GraphPartitionEnvironment(gym.Env):
             done = True
 
         # 返回下一个状态、塑形奖励、完成标志、截断标志 (False)、信息
+        # 注意：这里仍然返回矩阵格式，GNN智能体需要额外调用get_state('graph')
         return self._get_state(), shaped_reward, done, False, {}
 
     # for the PBRS calculation in the step method.
