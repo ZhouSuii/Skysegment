@@ -51,6 +51,39 @@ class GraphPartitionEnvironment(gym.Env):
         self._total_weight_sq = np.sum(self.node_weights)**2 + 1e-6
         self._total_edges = len(self.graph.edges()) + 1e-6
 
+        # === 新增：边索引缓存优化 ===
+        self._cached_edge_index = None
+        self._cached_edge_index_torch = None
+        self._edge_index_initialized = False
+        self._initialize_edge_index_cache()
+
+    def _initialize_edge_index_cache(self):
+        """=== 新增：初始化边索引缓存 ==="""
+        try:
+            import torch
+            
+            # 构建边索引 (只需计算一次，因为图拓扑不变)
+            edges = list(self.graph.edges())
+            if len(edges) > 0:
+                # 创建无向图的边索引（每条边两个方向）
+                edge_list = []
+                for u, v in edges:
+                    edge_list.append([u, v])
+                    edge_list.append([v, u])  # 反向边
+                self._cached_edge_index = np.array(edge_list, dtype=np.int64).T  # [2, num_edges]
+                self._cached_edge_index_torch = torch.tensor(self._cached_edge_index, dtype=torch.long)
+            else:
+                # 如果没有边，创建空的边索引
+                self._cached_edge_index = np.zeros((2, 0), dtype=np.int64)
+                self._cached_edge_index_torch = torch.zeros((2, 0), dtype=torch.long)
+            
+            self._edge_index_initialized = True
+            print(f"边索引缓存初始化完成 - 边数: {self._cached_edge_index.shape[1]}")
+            
+        except ImportError:
+            # 如果torch不可用，在需要时动态计算
+            print("PyTorch不可用，将在需要时动态计算边索引")
+            self._edge_index_initialized = False
 
     def reset(self, seed=None, state_format='matrix'):
         """
@@ -99,7 +132,7 @@ class GraphPartitionEnvironment(gym.Env):
     # === 新增：为GNN返回图结构数据的方法 ===
     def _get_graph_state(self):
         """
-        为GNN智能体返回图结构数据格式
+        === 优化：为GNN智能体返回图结构数据格式，使用边索引缓存 ===
         返回包含节点特征、边索引和分区信息的字典
         """
         import torch
@@ -122,18 +155,21 @@ class GraphPartitionEnvironment(gym.Env):
             normalized_weights = np.ones_like(self.node_weights)
         node_features[:, self.num_partitions + 1] = normalized_weights
         
-        # 2. 构建边索引 (edge_index)
-        edges = list(self.graph.edges())
-        if len(edges) > 0:
-            # 创建无向图的边索引（每条边两个方向）
-            edge_list = []
-            for u, v in edges:
-                edge_list.append([u, v])
-                edge_list.append([v, u])  # 反向边
-            edge_index = np.array(edge_list, dtype=np.int64).T  # 转置为 [2, num_edges]
+        # 2. === 优化：使用缓存的边索引 ===
+        if self._edge_index_initialized and self._cached_edge_index_torch is not None:
+            # 使用预计算的边索引缓存
+            edge_index = self._cached_edge_index_torch.clone()  # 克隆以避免意外修改
         else:
-            # 如果没有边，创建空的边索引
-            edge_index = np.zeros((2, 0), dtype=np.int64)
+            # 回退到动态计算（仅在缓存失败时）
+            edges = list(self.graph.edges())
+            if len(edges) > 0:
+                edge_list = []
+                for u, v in edges:
+                    edge_list.append([u, v])
+                    edge_list.append([v, u])  # 反向边
+                edge_index = torch.tensor(np.array(edge_list, dtype=np.int64).T, dtype=torch.long)
+            else:
+                edge_index = torch.zeros((2, 0), dtype=torch.long)
         
         # 3. 当前分区分配
         current_partition = self.partition_assignment.copy()
@@ -141,7 +177,7 @@ class GraphPartitionEnvironment(gym.Env):
         # 返回图结构数据
         graph_data = {
             'node_features': torch.tensor(node_features, dtype=torch.float32),
-            'edge_index': torch.tensor(edge_index, dtype=torch.long),
+            'edge_index': edge_index,
             'current_partition': torch.tensor(current_partition, dtype=torch.long)
         }
         
