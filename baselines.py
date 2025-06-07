@@ -88,8 +88,11 @@ def metis_partition(graph, num_partitions=2):
     for i in range(len(graph.nodes())):
         adjacency_list.append(list(graph.neighbors(i)))
 
-    # 获取节点权重
-    node_weights = [graph.nodes[i].get('weight', 1) for i in range(len(graph.nodes()))]
+    # 获取节点权重并确保为整数类型
+    node_weights = [int(round(graph.nodes[i].get('weight', 1))) for i in range(len(graph.nodes()))]
+    
+    # 确保所有权重至少为1（METIS要求正整数）
+    node_weights = [max(1, w) for w in node_weights]
 
     try:
         # PyMETIS直接支持节点权重

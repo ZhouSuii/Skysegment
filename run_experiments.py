@@ -788,12 +788,57 @@ def main():
     # 加载配置
     config = load_config("configs/default.json")
 
-    # 创建测试图
-    graph = create_test_graph(num_nodes=10, seed=42)
-    num_partitions = 2
+    # === 修改：优先尝试加载真实图，否则使用测试图 ===
+    real_graph_path = "ctu_airspace_graph_1900_2000_kmeans.graphml"
+    
+    if os.path.exists(real_graph_path):
+        print(f"🔄 使用真实空域图: {real_graph_path}")
+        try:
+            graph = nx.read_graphml(real_graph_path)
+            
+            # 重新编号节点确保连续性
+            node_mapping = {old_node: i for i, old_node in enumerate(graph.nodes())}
+            graph = nx.relabel_nodes(graph, node_mapping)
+            
+            # 确保权重为数值类型
+            for node in graph.nodes():
+                if 'weight' in graph.nodes[node]:
+                    graph.nodes[node]['weight'] = float(graph.nodes[node]['weight'])
+                else:
+                    graph.nodes[node]['weight'] = 1.0
+            
+            # 如果没有边，添加简单的连接
+            if graph.number_of_edges() == 0:
+                print("⚠️  图没有边，添加基本连接...")
+                nodes = list(graph.nodes())
+                for i in range(len(nodes) - 1):
+                    graph.add_edge(nodes[i], nodes[i + 1])
+                # 添加一些随机连接
+                import random
+                for _ in range(min(50, len(nodes) * 2)):
+                    u, v = random.choice(nodes), random.choice(nodes)
+                    if u != v:
+                        graph.add_edge(u, v)
+            
+            num_partitions = 3 if graph.number_of_nodes() > 15 else 2
+            graph_name = f"real_airspace_{graph.number_of_nodes()}nodes"
+            
+            print(f"✅ 真实图加载成功: {graph.number_of_nodes()}节点, {graph.number_of_edges()}边, {num_partitions}分区")
+            
+        except Exception as e:
+            print(f"❌ 真实图加载失败: {e}")
+            print("🔄 回退到测试图...")
+            graph = create_test_graph(num_nodes=10, seed=42)
+            num_partitions = 2
+            graph_name = "test_graph_10"
+    else:
+        print(f"🔄 真实图文件不存在，使用测试图")
+        graph = create_test_graph(num_nodes=10, seed=42)
+        num_partitions = 2
+        graph_name = "test_graph_10"
 
     print("开始图划分实验...")
-    df = run_experiment("test_graph_10", graph, num_partitions, config, results_dir)
+    df = run_experiment(graph_name, graph, num_partitions, config, results_dir)
 
     # === 新增：创建训练信息记录文件 ===
     training_info = {

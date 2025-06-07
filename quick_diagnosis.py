@@ -11,7 +11,7 @@ import os
 
 from new_environment import GraphPartitionEnvironment
 from agent_ppo import PPOAgent
-from agent_ppo_gnn_simple import SimplePPOAgentGNN
+from agent_ppo_gnn2 import PPOAgentGNN
 from metrics import evaluate_partition, calculate_partition_weights
 
 def create_test_graph(num_nodes=10):
@@ -41,10 +41,16 @@ def compare_training_dynamics(episodes=100):
         config={'learning_rate': 0.0003, 'batch_size': 16, 'use_tensorboard': False}
     )
     
-    gnn_agent = SimplePPOAgentGNN(
-        node_feature_dim=num_partitions + 2,
+    gnn_agent = PPOAgentGNN(
+        state_size=num_partitions + 2,  # 节点特征维度
         action_size=num_nodes * num_partitions,
-        config={'learning_rate': 0.0001, 'batch_size': 16, 'hidden_dim': 64, 'use_tensorboard': False}
+        config={
+            'learning_rate': 0.0001, 
+            'batch_size': 16, 
+            'hidden_dim': 64, 
+            'use_tensorboard': False,
+            'num_partitions': num_partitions
+        }
     )
     
     # 训练并记录详细数据
@@ -238,7 +244,7 @@ def generate_analysis_report(results):
 - 最佳性能episode: {ppo_stats['best_episode']}
 - 收敛速度: 快（~{ppo_stats['convergence_point']} episodes）
 
-### SimplePPOGNN智能体
+### PPOAgentGNN智能体
 - 最终平均奖励: {gnn_stats['final_avg_reward']:.2f} ± {gnn_stats['final_std_reward']:.2f}
 - 最终平均方差: {gnn_stats['final_avg_variance']:.2f} ± {gnn_stats['final_std_variance']:.2f}
 - 最佳性能episode: {gnn_stats['best_episode']}
