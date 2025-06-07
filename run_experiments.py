@@ -27,7 +27,7 @@ from metrics import evaluate_partition
 from baselines import random_partition, weighted_greedy_partition, metis_partition, spectral_partition
 from agent_gnn import GNNDQNAgent
 from agent_ppo import PPOAgent
-from agent_ppo_gnn2 import PPOAgentGNN
+from agent_ppo_gnn_simple import SimplePPOAgentGNN
 from metrics import calculate_weight_variance, calculate_partition_weights
 
 def create_test_graph(num_nodes=10, seed=42):
@@ -395,7 +395,7 @@ def train_gnn_ppo_agent(graph, num_partitions, config, results_dir="results"):
     # 计算节点特征维度：分区数 + 度 + 权重
     node_feature_dim = num_partitions + 2
     action_size = len(graph.nodes()) * num_partitions
-    agent = PPOAgentGNN(node_feature_dim, action_size, gnn_ppo_config)
+    agent = SimplePPOAgentGNN(node_feature_dim, action_size, gnn_ppo_config)
     
     # 创建结果目录
     os.makedirs(f"{results_dir}/models", exist_ok=True)
