@@ -5,13 +5,11 @@ import seaborn as sns
 from math import radians, sin, cos, atan2, degrees
 import time
 import networkx as nx
-from scipy.spatial import ConvexHull, KDTree # 导入 KDTree 用于近邻搜索
+from scipy.spatial import ConvexHull, KDTree, Delaunay # 导入 KDTree 和 Delaunay
 import matplotlib.patches as patches
 import traceback
 from sklearn.cluster import KMeans # 导入 K-Means 聚类
-# 可能需要安装 geopy 来计算地理距离，或者使用近似的球面余弦公式
-# from geopy.distance import great_circle # 可选的精确地理距离计算
-# from geopy.point import Point
+
 
 # --- 配置参数 ---
 CSV_FILE_PATH = '/mnt/d/All/Python/Skysegment/2024-11-11/2024-11-11-CTU.csv'
@@ -320,6 +318,12 @@ if num_graph_nodes_actual >= 3:
             if not G.has_edge(v2, v0): G.add_edge(v2, v0); added_edges += 1
 
         print(f"通过 Delaunay 三角剖分添加了 {added_edges} 条边。")
+        
+        # 添加连接统计信息
+        total_edges = G.number_of_edges()
+        print(f"总边数: {total_edges}")
+        print(f"图连通性: {'是' if nx.is_connected(G) else '否'}")
+        print(f"平均度数: {2 * total_edges / num_graph_nodes_actual:.2f}")
 
     except Exception as e:
         print(f"Delaunay 三角剖分出错: {e}")
@@ -374,7 +378,19 @@ if num_graph_nodes_actual > 0:
 
     print(f"绘制了 {num_graph_nodes_actual} 个图节点，大小反映权重。")
 
-    # d. 绘制节点的凸包 (红色虚线边界)
+    # d. 绘制Delaunay三角剖分的边
+    if G.number_of_edges() > 0:
+        print(f"绘制 {G.number_of_edges()} 条Delaunay边...")
+        for u, v in G.edges():
+            coord_u = graph_node_coords[u]
+            coord_v = graph_node_coords[v]
+            ax.plot([coord_u[0], coord_v[0]], [coord_u[1], coord_v[1]], 
+                   'gray', alpha=0.5, linewidth=0.8)
+        
+        # 添加边的图例（只添加一次）
+        ax.plot([], [], 'gray', alpha=0.5, linewidth=0.8, label='Delaunay连接边')
+
+    # e. 绘制节点的凸包 (红色虚线边界)
     if num_graph_nodes_actual >= 3:
         try:
             hull = ConvexHull(graph_node_coords)
