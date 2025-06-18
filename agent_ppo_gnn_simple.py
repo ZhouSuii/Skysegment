@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 from torch.distributions import Categorical
 
-# === 简化的GCN实现 ===
+# === 回滚到简化的GCN实现 ===
 class SimpleGCNConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(SimpleGCNConv, self).__init__()
@@ -15,7 +15,7 @@ class SimpleGCNConv(nn.Module):
     def forward(self, x, edge_index):
         num_nodes = x.size(0)
         
-        # 构建邻接矩阵
+        # 构建邻接矩阵（原始简洁实现）
         adj = torch.zeros(num_nodes, num_nodes, device=x.device)
         if edge_index.size(1) > 0:  # 检查是否有边
             adj[edge_index[0], edge_index[1]] = 1.0
@@ -34,11 +34,12 @@ class SimpleGCNConv(nn.Module):
         return out
 
 
-# === 极简GNN策略网络 ===
+# === 优化后的GNN策略网络：支持真正的批量处理 ===
 class SimplePPOPolicyGNN(nn.Module):
     def __init__(self, node_feature_dim, action_size, hidden_dim=64):
         super(SimplePPOPolicyGNN, self).__init__()
         self.action_size = action_size
+        self.hidden_dim = hidden_dim
         
         # === 超简化：只用1层GNN ===
         self.gnn = SimpleGCNConv(node_feature_dim, hidden_dim)
@@ -58,6 +59,18 @@ class SimplePPOPolicyGNN(nn.Module):
             nn.Linear(hidden_dim // 2, 1)
         )
 
+        # === 优化：改进权重初始化 ===
+        self._init_weights()
+
+    def _init_weights(self):
+        """改进的权重初始化，提升训练稳定性"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # He初始化适用于ReLU激活
+                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
     def forward(self, graph_data):
         x = graph_data['node_features']
         edge_index = graph_data['edge_index']
@@ -74,6 +87,57 @@ class SimplePPOPolicyGNN(nn.Module):
         
         return action_probs, value
 
+    def forward_batch(self, batch_graph_data_list):
+        """=== 新增：真正的批量前向传播 ==="""
+        batch_size = len(batch_graph_data_list)
+        device = next(self.parameters()).device
+        
+        # 批量处理每个图
+        batch_action_probs = []
+        batch_values = []
+        
+        for graph_data in batch_graph_data_list:
+            # 确保数据在正确设备上
+            if isinstance(graph_data['node_features'], np.ndarray):
+                x = torch.tensor(graph_data['node_features'], dtype=torch.float32, device=device)
+            else:
+                x = graph_data['node_features'].to(device)
+                
+            if isinstance(graph_data['edge_index'], np.ndarray):
+                edge_index = torch.tensor(graph_data['edge_index'], dtype=torch.long, device=device)
+            else:
+                edge_index = graph_data['edge_index'].to(device)
+            
+            # GNN特征提取
+            x = F.relu(self.gnn(x, edge_index))
+            graph_repr = torch.mean(x, dim=0, keepdim=True)
+            
+            # 动作概率和价值
+            action_probs = self.actor(graph_repr).squeeze(0)
+            value = self.critic(graph_repr).squeeze()
+            
+            batch_action_probs.append(action_probs)
+            batch_values.append(value)
+        
+        # 堆叠结果
+        batch_action_probs = torch.stack(batch_action_probs)  # [batch_size, action_size]
+        batch_values = torch.stack(batch_values)  # [batch_size]
+        
+        return batch_action_probs, batch_values
+
+    def evaluate_batch(self, batch_graph_data_list, batch_actions):
+        """=== 新增：批量评估 ==="""
+        batch_action_probs, batch_values = self.forward_batch(batch_graph_data_list)
+        
+        # 计算动作对数概率
+        action_dists = Categorical(batch_action_probs)
+        action_log_probs = action_dists.log_prob(batch_actions)
+        
+        # 计算熵
+        entropies = action_dists.entropy()
+        
+        return action_log_probs, batch_values, entropies
+
     def act(self, graph_data):
         action_probs, _ = self.forward(graph_data)
         dist = Categorical(action_probs)
@@ -89,7 +153,7 @@ class SimplePPOPolicyGNN(nn.Module):
         return action_log_prob, value, entropy
 
 
-# === 简化的PPO智能体 ===
+# === 大幅优化的PPO智能体：真正的批量处理 ===
 class SimplePPOAgentGNN:
     def __init__(self, state_size, action_size, config=None):
         self.state_size = state_size
@@ -102,15 +166,15 @@ class SimplePPOAgentGNN:
         self.gamma = config.get('gamma', 0.99)
         self.gae_lambda = config.get('gae_lambda', 0.95)
         self.clip_ratio = config.get('clip_ratio', 0.2)
-        self.learning_rate = config.get('learning_rate', 0.0001)  # 降低学习率
-        self.ppo_epochs = config.get('ppo_epochs', 3)  # 减少更新轮数
-        self.batch_size = config.get('batch_size', 32)  # 减小批量
-        self.entropy_coef = config.get('entropy_coef', 0.02)  # 增加探索
+        self.learning_rate = config.get('learning_rate', 0.0003)  # 适中的学习率
+        self.ppo_epochs = config.get('ppo_epochs', 4)  # 标准PPO轮数
+        self.batch_size = config.get('batch_size', 128)  # 增大批量
+        self.entropy_coef = config.get('entropy_coef', 0.01)
         self.value_coef = config.get('value_coef', 0.5)
-        self.update_frequency = config.get('update_frequency', 8)  # 增加更新频率
+        self.update_frequency = config.get('update_frequency', 64)  # 更大的更新频率
         
-        # 简化的缓冲区
-        self.memory_capacity = config.get('memory_capacity', 10000)
+        # 缓冲区
+        self.memory_capacity = config.get('memory_capacity', 20000)
         self.graph_data_buffer = []
         self.actions = np.zeros(self.memory_capacity, dtype=np.int64)
         self.log_probs = np.zeros(self.memory_capacity, dtype=np.float32)
@@ -123,13 +187,13 @@ class SimplePPOAgentGNN:
         
         # 设备设置
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"简化PPO-GNN使用设备: {self.device}")
+        print(f"🚀 优化简化PPO-GNN使用设备: {self.device}")
 
         # === 简化的网络 ===
         self.policy = SimplePPOPolicyGNN(
             node_feature_dim=state_size,
             action_size=action_size,
-            hidden_dim=config.get('hidden_dim', 64)  # 减小隐藏层
+            hidden_dim=config.get('hidden_dim', 128)  # 增加隐藏层大小
         ).to(self.device)
         
         self.optimizer = optim.Adam(self.policy.parameters(), lr=self.learning_rate)
@@ -142,6 +206,10 @@ class SimplePPOAgentGNN:
             self.logger = TensorboardLogger(tensorboard_config)
         else:
             self.logger = None
+
+        # === 新增：批量处理优化 ===
+        self.enable_batch_processing = config.get('enable_batch_processing', True)
+        print(f"🔧 批量处理: {'启用' if self.enable_batch_processing else '禁用'}")
 
     def _move_graph_to_device(self, graph_data, target_device=None):
         if target_device is None:
@@ -221,7 +289,7 @@ class SimplePPOAgentGNN:
         returns_tensor = torch.tensor(returns, dtype=torch.float32).to(self.device)
         advantages_tensor = torch.tensor(advantages, dtype=torch.float32).to(self.device)
 
-        # === 简化的PPO更新：逐个处理，避免批量问题 ===
+        # === 核心优化：真正的批量PPO更新 ===
         total_loss = 0.0
         update_rounds = 0
         dataset_size = len(indices)
@@ -234,34 +302,69 @@ class SimplePPOAgentGNN:
                 end_idx = min(start_idx + current_batch_size, dataset_size)
                 batch_indices = perm_indices[start_idx:end_idx]
                 
-                batch_loss = 0.0
-                for i in batch_indices:
-                    graph_data = self._move_graph_to_device(graph_data_list[i])
+                # === 关键优化：批量处理而不是逐个处理 ===
+                if self.enable_batch_processing and len(batch_indices) > 1:
+                    # 使用真正的批量处理
+                    batch_graph_data_list = [graph_data_list[i] for i in batch_indices]
+                    batch_actions = actions[batch_indices]
+                    batch_old_log_probs = old_log_probs[batch_indices]
+                    batch_returns = returns_tensor[batch_indices]
+                    batch_advantages = advantages_tensor[batch_indices]
                     
-                    new_log_prob, value, entropy = self.policy.evaluate(graph_data, actions[i])
-
-                    # PPO损失计算
-                    ratio = torch.exp(new_log_prob - old_log_probs[i])
-                    surr1 = ratio * advantages_tensor[i]
-                    surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * advantages_tensor[i]
-                    policy_loss = -torch.min(surr1, surr2)
-
-                    value_loss = F.mse_loss(value, returns_tensor[i])
-                    entropy_loss = -entropy
-
+                    # 批量评估
+                    new_log_probs, values, entropies = self.policy.evaluate_batch(
+                        batch_graph_data_list, batch_actions
+                    )
+                    
+                    # PPO损失计算（向量化）
+                    ratios = torch.exp(new_log_probs - batch_old_log_probs)
+                    surr1 = ratios * batch_advantages
+                    surr2 = torch.clamp(ratios, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * batch_advantages
+                    policy_loss = -torch.min(surr1, surr2).mean()
+                    
+                    value_loss = F.mse_loss(values, batch_returns)
+                    entropy_loss = -entropies.mean()
+                    
                     loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
-                    batch_loss += loss
+                    
+                    # 单次反向传播
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+                    self.optimizer.step()
+                    
+                    total_loss += loss.item()
+                    update_rounds += 1
+                else:
+                    # 回退到逐个处理（小批量时）
+                    batch_loss = 0.0
+                    for i in batch_indices:
+                        graph_data = self._move_graph_to_device(graph_data_list[i])
+                        
+                        new_log_prob, value, entropy = self.policy.evaluate(graph_data, actions[i])
 
-                # 平均批次损失并反向传播
-                avg_batch_loss = batch_loss / len(batch_indices)
-                total_loss += avg_batch_loss.item()
+                        # PPO损失计算
+                        ratio = torch.exp(new_log_prob - old_log_probs[i])
+                        surr1 = ratio * advantages_tensor[i]
+                        surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * advantages_tensor[i]
+                        policy_loss = -torch.min(surr1, surr2)
 
-                self.optimizer.zero_grad()
-                avg_batch_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-                self.optimizer.step()
+                        value_loss = F.mse_loss(value, returns_tensor[i])
+                        entropy_loss = -entropy
 
-                update_rounds += 1
+                        loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
+                        batch_loss += loss
+
+                    # 平均批次损失并反向传播
+                    avg_batch_loss = batch_loss / len(batch_indices)
+                    total_loss += avg_batch_loss.item()
+
+                    self.optimizer.zero_grad()
+                    avg_batch_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+                    self.optimizer.step()
+
+                    update_rounds += 1
 
         # 清理
         self.traj_start_ptr = self.buffer_ptr

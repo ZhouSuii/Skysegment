@@ -9,6 +9,7 @@ import pandas as pd
 import json
 import torch
 from tqdm import tqdm
+import random
 
 # 配置中文字体支持
 try:
@@ -29,6 +30,26 @@ from agent_gnn import GNNDQNAgent
 from agent_ppo import PPOAgent
 from agent_ppo_gnn_simple import SimplePPOAgentGNN
 from metrics import calculate_weight_variance, calculate_partition_weights
+
+def set_seed(seed=42):
+    """
+    设置所有随机种子，确保每个算法都从相同的随机状态开始
+    这是解决算法间公平对比的关键函数
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # 确保CUDA操作的确定性
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # 设置环境变量确保Python hash的确定性
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    print(f"🔧 重置随机种子为: {seed}")
 
 def create_test_graph(num_nodes=10, seed=42):
     """创建测试图，带有节点权重"""
@@ -79,6 +100,8 @@ def load_config(config_path):
 
 
 def train_dqn_agent(graph, num_partitions, config, results_dir="results"):
+    # 每个算法都从相同的随机状态开始
+    set_seed(42)
     """训练DQN智能体"""
     # 获取配置参数
     episodes = config.get("episodes", 1000)
@@ -179,6 +202,8 @@ def train_dqn_agent(graph, num_partitions, config, results_dir="results"):
 
 
 def train_gnn_agent(graph, num_partitions, config, results_dir="results"):
+    # 每个算法都从相同的随机状态开始
+    set_seed(42)
     """训练GNN智能体"""
     # 获取配置参数
     episodes = config.get("episodes", 500)
@@ -273,6 +298,8 @@ def train_gnn_agent(graph, num_partitions, config, results_dir="results"):
 
 # 添加训练PPO智能体的函数
 def train_ppo_agent(graph, num_partitions, config, results_dir="results"):
+    # 每个算法都从相同的随机状态开始
+    set_seed(42)
     """训练PPO智能体"""
     # 获取配置参数
     episodes = config.get("episodes", 1000)
@@ -369,6 +396,8 @@ def train_ppo_agent(graph, num_partitions, config, results_dir="results"):
 
 # 添加训练GNN-PPO智能体的函数
 def train_gnn_ppo_agent(graph, num_partitions, config, results_dir="results"):
+    # 每个算法都从相同的随机状态开始
+    set_seed(42)
     """训练GNN-PPO智能体"""
     # 获取配置参数
     episodes = config.get("episodes", 500)
@@ -709,13 +738,40 @@ def plot_comparison(graph_name, results, results_dir):
 
 
 def main():
+    # === 关键修复：设置全局随机种子确保实验可重复性 ===
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    # 确保CUDA操作的确定性
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"🔧 全局随机种子设置为: {SEED} (确保实验可重复性)")
+
+    # === GPU优化配置 ===
+    if torch.cuda.is_available():
+        # 启用CUDA优化
+        torch.backends.cudnn.benchmark = True  # 针对固定输入大小优化
+        torch.backends.cuda.matmul.allow_tf32 = True  # 允许TF32加速
+        torch.backends.cudnn.allow_tf32 = True
+        
+        # 设置内存分配策略
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+        
+        print(f"🚀 GPU优化已启用: {torch.cuda.get_device_name(0)}")
+        print(f"   - cuDNN benchmark: True")
+        print(f"   - TF32 加速: True")
+        print(f"   - 内存分配优化: True")
+    
     # 限制 PyTorch 和底层库使用的线程数，减少后台线程空闲等待
     # 建议设置为物理核心数，例如 4 或 8，根据您的服务器调整
-    num_threads = 8
+    num_threads = 6  # 稍微减少避免过度竞争
     torch.set_num_threads(num_threads)
     os.environ['OMP_NUM_THREADS'] = str(num_threads)
     os.environ['MKL_NUM_THREADS'] = str(num_threads)
-    print(f"限制 PyTorch/OMP/MKL 线程数为: {num_threads}")
+    print(f"🔧 限制 PyTorch/OMP/MKL 线程数为: {num_threads}")
 
     # 添加这两行禁用强制同步
     os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
@@ -814,7 +870,6 @@ def main():
                 for i in range(len(nodes) - 1):
                     graph.add_edge(nodes[i], nodes[i + 1])
                 # 添加一些随机连接
-                import random
                 for _ in range(min(50, len(nodes) * 2)):
                     u, v = random.choice(nodes), random.choice(nodes)
                     if u != v:
