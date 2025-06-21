@@ -36,23 +36,23 @@ class SimpleGCNConv(nn.Module):
 
 # === 优化后的GNN策略网络：支持真正的批量处理 ===
 class SimplePPOPolicyGNN(nn.Module):
-    def __init__(self, node_feature_dim, action_size, hidden_dim=64):
+    def __init__(self, node_feature_dim, num_nodes, num_partitions, hidden_dim=64):
         super(SimplePPOPolicyGNN, self).__init__()
-        self.action_size = action_size
+        self.num_nodes = num_nodes
+        self.num_partitions = num_partitions
         self.hidden_dim = hidden_dim
         
-        # === 超简化：只用1层GNN ===
         self.gnn = SimpleGCNConv(node_feature_dim, hidden_dim)
         
-        # === 直接动作预测（移除双头设计）===
+        # === 核心修改：Actor现在基于每个节点的嵌入来预测分区 ===
+        # 输入是 [N, hidden_dim]，输出是 [N, num_partitions]
         self.actor = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, action_size),
-            nn.Softmax(dim=-1)
+            nn.Linear(hidden_dim // 2, num_partitions)
         )
         
-        # === 简化的Critic ===
+        # === Critic 保持不变，基于图的全局表示 ===
         self.critic = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -72,17 +72,33 @@ class SimplePPOPolicyGNN(nn.Module):
                     nn.init.constant_(module.bias, 0)
 
     def forward(self, graph_data):
+        # === 修复：确保输入数据和模型在同一设备上 ===
+        device = next(self.parameters()).device
         x = graph_data['node_features']
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32, device=device)
+        else:
+            x = x.to(device)
+
         edge_index = graph_data['edge_index']
+        if not isinstance(edge_index, torch.Tensor):
+            edge_index = torch.tensor(edge_index, dtype=torch.long, device=device)
+        else:
+            edge_index = edge_index.to(device)
         
-        # 单层GNN特征提取
-        x = F.relu(self.gnn(x, edge_index))
+        # GNN特征提取, 输出 shape: [num_nodes, hidden_dim]
+        node_embeddings = F.relu(self.gnn(x, edge_index))
         
-        # 全局图表示：简单平均池化
-        graph_repr = torch.mean(x, dim=0, keepdim=True)
+        # === 核心修改：Actor基于节点嵌入生成动作logits ===
+        # node_action_logits 的 shape: [num_nodes, num_partitions]
+        node_action_logits = self.actor(node_embeddings)
         
-        # 动作概率和价值
-        action_probs = self.actor(graph_repr).squeeze(0)  # [action_size]
+        # 展平为 [num_nodes * num_partitions] 的向量，以匹配环境的扁平化动作空间
+        flat_logits = node_action_logits.view(-1)
+        action_probs = F.softmax(flat_logits, dim=-1) # Shape: [action_size]
+        
+        # === Critic 使用图的全局表示来评估状态价值 ===
+        graph_repr = torch.mean(node_embeddings, dim=0, keepdim=True)
         value = self.critic(graph_repr).squeeze()  # scalar
         
         return action_probs, value
@@ -97,24 +113,9 @@ class SimplePPOPolicyGNN(nn.Module):
         batch_values = []
         
         for graph_data in batch_graph_data_list:
-            # 确保数据在正确设备上
-            if isinstance(graph_data['node_features'], np.ndarray):
-                x = torch.tensor(graph_data['node_features'], dtype=torch.float32, device=device)
-            else:
-                x = graph_data['node_features'].to(device)
-                
-            if isinstance(graph_data['edge_index'], np.ndarray):
-                edge_index = torch.tensor(graph_data['edge_index'], dtype=torch.long, device=device)
-            else:
-                edge_index = graph_data['edge_index'].to(device)
-            
-            # GNN特征提取
-            x = F.relu(self.gnn(x, edge_index))
-            graph_repr = torch.mean(x, dim=0, keepdim=True)
-            
-            # 动作概率和价值
-            action_probs = self.actor(graph_repr).squeeze(0)
-            value = self.critic(graph_repr).squeeze()
+            # === 此处逻辑通过调用 self.forward() 简化和统一 ===
+            # self.forward 内部现在会处理设备移动
+            action_probs, value = self.forward(graph_data)
             
             batch_action_probs.append(action_probs)
             batch_values.append(value)
@@ -162,6 +163,14 @@ class SimplePPOAgentGNN:
         if config is None:
             config = {}
 
+        # === 核心修改：从配置中获取分区数，并计算节点数 ===
+        self.num_partitions = config.get('num_partitions')
+        if self.num_partitions is None:
+            raise ValueError("Config must contain 'num_partitions' for GNN-PPO agent.")
+        self.num_nodes = self.action_size // self.num_partitions
+        if self.action_size % self.num_partitions != 0:
+            raise ValueError("Action size is not a multiple of num_partitions.")
+
         # === 更保守的超参数 ===
         self.gamma = config.get('gamma', 0.99)
         self.gae_lambda = config.get('gae_lambda', 0.95)
@@ -189,11 +198,12 @@ class SimplePPOAgentGNN:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"🚀 优化简化PPO-GNN使用设备: {self.device}")
 
-        # === 简化的网络 ===
+        # === 核心修改：向策略网络传递节点数和分区数 ===
         self.policy = SimplePPOPolicyGNN(
             node_feature_dim=state_size,
-            action_size=action_size,
-            hidden_dim=config.get('hidden_dim', 128)  # 增加隐藏层大小
+            num_nodes=self.num_nodes,
+            num_partitions=self.num_partitions,
+            hidden_dim=config.get('hidden_dim', 128)
         ).to(self.device)
         
         self.optimizer = optim.Adam(self.policy.parameters(), lr=self.learning_rate)

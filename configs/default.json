@@ -1,5 +1,5 @@
 {
-  "episodes": 2500,
+  "episodes": 2000,
   "max_steps": 100,
   "batch_size": 128,
   "methods": [
@@ -13,9 +13,9 @@
     "random"
   ],
   "potential_weights": {
-    "variance": 3.6263409698687026,
-    "edge_cut": 0.4461827081071835,
-    "modularity": 0.15661647836919
+    "variance": 1,
+    "edge_cut": 2,
+    "modularity": 2
   },
   "dqn_config": {
     "learning_rate": 0.00034139312481129536,
@@ -54,16 +54,16 @@
     "gamma": 0.966382464092941,
     "gae_lambda": 0.947215353198062,
     "clip_ratio": 0.21991770987453751,
-    "ppo_epochs": 2,
+    "ppo_epochs": 6,
     "batch_size": 256,
     "entropy_coef": 0.015247864825037727,
     "value_coef": 0.5024500810050793,
     "update_frequency": 9
   },
   "gnn_ppo_config": {
-    "learning_rate": 0.00013672301138405844,
-    "hidden_dim": 2048,
-    "num_layers": 3,
+    "learning_rate": 0.00001,
+    "hidden_dim": 256,
+    "num_layers": 1,
     "dropout_rate": 0.29848044095633763,
     "gamma": 0.976182738341991,
     "gae_lambda": 0.9247552478110529,
