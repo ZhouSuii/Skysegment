@@ -135,6 +135,8 @@ def train_dqn_agent(graph, num_partitions, config, results_dir="results"):
     rewards_history = []
     loss_history = []  # 新增：记录损失历史
     variance_history = []  # 新增：记录方差历史
+    timesteps_history = [] # 新增：记录时间步
+    total_steps = 0      # 新增：总步数计数器
 
     # 训练循环
     progress_bar = tqdm(range(episodes), desc="训练DQN")
@@ -150,6 +152,7 @@ def train_dqn_agent(graph, num_partitions, config, results_dir="results"):
             agent.remember(state, action, reward, next_state, done)
             state = next_state
             total_reward += reward
+            total_steps += 1 # 累加总步数
 
             if done:
                 break
@@ -160,21 +163,18 @@ def train_dqn_agent(graph, num_partitions, config, results_dir="results"):
         # 进行经验回放学习
         if memory_size >= batch_size:
             loss = agent.replay(batch_size)  # 获取返回的损失值
-            loss_history.append(loss)  # 记录损失
-        else:
-            loss_history.append(0.0)  # 如果没有学习，记录0损失
-
-        # 计算并记录当前分区的方差
-        if env.partition_assignment is not None:
+            
+            # 仅在有效更新时记录所有指标
+            loss_history.append(loss)
+            rewards_history.append(total_reward)
+            
+            # 计算并记录当前分区的方差
             from metrics import calculate_weight_variance
             variance = calculate_weight_variance(graph, env.partition_assignment, num_partitions)
-            variance_history.append(variance)  # 记录方差
-        else:
-            variance_history.append(0.0)  # 默认方差为0
-
-        # 记录奖励
-        rewards_history.append(total_reward)
-
+            variance_history.append(variance)
+            
+            timesteps_history.append(total_steps)
+        
         # 更新最佳划分
         if total_reward > best_reward:
             best_reward = total_reward
@@ -198,7 +198,7 @@ def train_dqn_agent(graph, num_partitions, config, results_dir="results"):
     os.makedirs(f"{results_dir}/models", exist_ok=True)
     agent.save_model(f"{results_dir}/models/dqn_model_{len(graph.nodes())}nodes_{num_partitions}parts.pt")
 
-    return best_partition, rewards_history, loss_history, variance_history
+    return best_partition, rewards_history, loss_history, variance_history, timesteps_history
 
 
 def train_gnn_agent(graph, num_partitions, config, results_dir="results"):
@@ -231,6 +231,8 @@ def train_gnn_agent(graph, num_partitions, config, results_dir="results"):
     rewards_history = []
     loss_history = []  # 新增：记录损失历史
     variance_history = []  # 新增：记录方差历史
+    timesteps_history = [] # 新增：记录时间步
+    total_steps = 0      # 新增：总步数计数器
 
     # 训练循环
     progress_bar = tqdm(range(episodes), desc="训练GNN-DQN")
@@ -246,6 +248,7 @@ def train_gnn_agent(graph, num_partitions, config, results_dir="results"):
             agent.remember(state, action, reward, next_state, done)
             state = next_state
             total_reward += reward
+            total_steps += 1 # 累加总步数
 
             if done:
                 break
@@ -256,21 +259,18 @@ def train_gnn_agent(graph, num_partitions, config, results_dir="results"):
         # 进行经验回放学习
         if memory_size >= batch_size:
             loss = agent.replay()  # 获取返回的损失值
-            loss_history.append(loss)  # 记录损失
-        else:
-            loss_history.append(0.0)  # 如果没有学习，记录0损失
-
-        # 计算并记录当前分区的方差
-        if env.partition_assignment is not None:
+            
+            # 仅在有效更新时记录所有指标
+            loss_history.append(loss)
+            rewards_history.append(total_reward)
+            
+            # 计算并记录当前分区的方差
             from metrics import calculate_weight_variance
             variance = calculate_weight_variance(graph, env.partition_assignment, num_partitions)
-            variance_history.append(variance)  # 记录方差
-        else:
-            variance_history.append(0.0)  # 默认方差为0
-
-        # 记录奖励
-        rewards_history.append(total_reward)
-
+            variance_history.append(variance)
+            
+            timesteps_history.append(total_steps)
+        
         # 更新最佳划分
         if total_reward > best_reward:
             best_reward = total_reward
@@ -294,7 +294,7 @@ def train_gnn_agent(graph, num_partitions, config, results_dir="results"):
     os.makedirs(f"{results_dir}/models", exist_ok=True)
     agent.save_model(f"{results_dir}/models/gnn_model_{len(graph.nodes())}nodes_{num_partitions}parts.pt")
 
-    return best_partition, rewards_history, loss_history, variance_history
+    return best_partition, rewards_history, loss_history, variance_history, timesteps_history
 
 # 添加训练PPO智能体的函数
 def train_ppo_agent(graph, num_partitions, config, results_dir="results"):
@@ -331,6 +331,8 @@ def train_ppo_agent(graph, num_partitions, config, results_dir="results"):
     rewards_history = []
     loss_history = []  # 新增：记录损失
     variance_history = []  # 新增：记录方差
+    timesteps_history = [] # 新增：记录时间步
+    total_steps = 0      # 新增：总步数计数器
 
     # 训练循环
     progress_bar = tqdm(range(episodes), desc="训练PPO")
@@ -347,6 +349,7 @@ def train_ppo_agent(graph, num_partitions, config, results_dir="results"):
             state = next_state
             total_reward += reward
             step_rewards.append(reward)
+            total_steps += 1 # 累加总步数
 
             # 记录单步信息
             if agent.logger is not None and e % agent.logger.log_freq == 0:
@@ -360,6 +363,7 @@ def train_ppo_agent(graph, num_partitions, config, results_dir="results"):
         loss = agent.update()
         rewards_history.append(total_reward)
         loss_history.append(loss)
+        timesteps_history.append(total_steps)
 
         # 计算当前分区权重方差
         partition_weights = calculate_partition_weights(graph, env.partition_assignment, num_partitions)
@@ -391,7 +395,7 @@ def train_ppo_agent(graph, num_partitions, config, results_dir="results"):
     os.makedirs(f"{results_dir}/models", exist_ok=True)
     agent.save_model(f"{results_dir}/models/ppo_model_{len(graph.nodes())}nodes_{num_partitions}parts.pt")
 
-    return best_partition, rewards_history, loss_history, variance_history
+    return best_partition, rewards_history, loss_history, variance_history, timesteps_history
 
 
 # 添加训练GNN-PPO智能体的函数
@@ -434,6 +438,8 @@ def train_gnn_ppo_agent(graph, num_partitions, config, results_dir="results"):
     rewards_history = []
     loss_history = []
     variance_history = []
+    timesteps_history = [] # 新增
+    total_steps = 0      # 新增
     
     # 训练循环    
     progress_bar = tqdm(range(episodes), desc="训练GNN-PPO")
@@ -454,18 +460,23 @@ def train_gnn_ppo_agent(graph, num_partitions, config, results_dir="results"):
             
             graph_state = next_graph_state
             total_reward += reward
+            total_steps += 1 # 累加总步数
             if done:
                 break
 
         # 更新策略
-        loss = agent.update()
-        loss_history.append(loss)
-        rewards_history.append(total_reward)
+        loss, updated = agent.update()
+        
+        # 仅在有效更新时记录
+        if updated:
+            loss_history.append(loss)
+            rewards_history.append(total_reward)
 
-        # 计算当前分区权重方差
-        partition_weights = calculate_partition_weights(graph, env.partition_assignment, num_partitions)
-        weight_variance = np.var(partition_weights)
-        variance_history.append(weight_variance)
+            # 计算当前分区权重方差
+            partition_weights = calculate_partition_weights(graph, env.partition_assignment, num_partitions)
+            weight_variance = np.var(partition_weights)
+            variance_history.append(weight_variance)
+            timesteps_history.append(total_steps)
         
         # === 删除：所有健康检查相关代码 ===
         
@@ -493,7 +504,7 @@ def train_gnn_ppo_agent(graph, num_partitions, config, results_dir="results"):
     # 保存模型
     agent.save_model(f"{results_dir}/models/gnn_ppo_model_{len(graph.nodes())}nodes_{num_partitions}parts.pt")
 
-    return best_partition, rewards_history, loss_history, variance_history
+    return best_partition, rewards_history, loss_history, variance_history, timesteps_history
 
 
 def run_experiment(graph_name, graph, num_partitions, config, results_dir="results"):
@@ -521,36 +532,40 @@ def run_experiment(graph_name, graph, num_partitions, config, results_dir="resul
         elif method == "metis":
             partition = metis_partition(graph, num_partitions)
         elif method == "dqn":
-            partition, rewards, losses, variances = train_dqn_agent(graph, num_partitions, config, results_dir)
+            partition, rewards, losses, variances, timesteps = train_dqn_agent(graph, num_partitions, config, results_dir)
             # 记录训练历史
             training_data["dqn"] = {
                 "rewards": rewards,
                 "loss": losses,
-                "variance": variances
+                "variance": variances,
+                "timesteps": timesteps
             }
         elif method == "gnn":
-            partition, rewards, losses, variances = train_gnn_agent(graph, num_partitions, config, results_dir)
+            partition, rewards, losses, variances, timesteps = train_gnn_agent(graph, num_partitions, config, results_dir)
             # 记录训练历史
             training_data["gnn"] = {
                 "rewards": rewards,
                 "loss": losses,
-                "variance": variances
+                "variance": variances,
+                "timesteps": timesteps
             }
         elif method == "ppo":
-            partition, rewards, losses, variances = train_ppo_agent(graph, num_partitions, config, results_dir)
+            partition, rewards, losses, variances, timesteps = train_ppo_agent(graph, num_partitions, config, results_dir)
             # 记录训练历史
             training_data["ppo"] = {
                 "rewards": rewards,
                 "loss": losses,
-                "variance": variances
+                "variance": variances,
+                "timesteps": timesteps
             }
         elif method == "gnn_ppo":
-            partition, rewards, losses, variances = train_gnn_ppo_agent(graph, num_partitions, config, results_dir)
+            partition, rewards, losses, variances, timesteps = train_gnn_ppo_agent(graph, num_partitions, config, results_dir)
             # 记录训练历史
             training_data["gnn_ppo"] = {
                 "rewards": rewards,
                 "loss": losses,
-                "variance": variances
+                "variance": variances,
+                "timesteps": timesteps
             }
         else:
             print(f"未知方法: {method}")
@@ -605,12 +620,26 @@ def plot_training_curves(graph_name, training_data, results_dir):
     plt.figure(figsize=(12, 8))
     for method in rl_methods:
         rewards = training_data[method]["rewards"]
+        timesteps = training_data[method].get("timesteps")
+        if not rewards: continue # 如果没有数据点，则跳过
+
         # 平滑处理以便更好地可视化
         window_size = min(10, len(rewards) // 10) if len(rewards) > 10 else 1
         smoothed_rewards = np.convolve(rewards, np.ones(window_size) / window_size, mode='valid')
-        plt.plot(smoothed_rewards, label=method.upper())
+        
+        # 决定x轴
+        if timesteps and len(timesteps) == len(rewards):
+            # 调整时间步以匹配平滑后的数据长度
+            x_axis = timesteps[window_size - 1:]
+            xlabel = "Timesteps"
+        else:
+            x_axis = np.arange(len(smoothed_rewards))
+            xlabel = "Updates"
+            
+        plt.plot(x_axis, smoothed_rewards, label=method.upper())
+        
     plt.title(f"Training Reward Curve - {graph_name}")
-    plt.xlabel("Episodes")
+    plt.xlabel(xlabel)
     plt.ylabel("Total Reward")
     plt.legend()    
     plt.grid(True)
@@ -622,12 +651,24 @@ def plot_training_curves(graph_name, training_data, results_dir):
     plt.figure(figsize=(12, 8))
     for method in rl_methods:
         loss = training_data[method]["loss"]
+        timesteps = training_data[method].get("timesteps")
+        if not loss: continue
+
         # 平滑处理以便更好地可视化
         window_size = min(10, len(loss) // 10) if len(loss) > 10 else 1
         smoothed_loss = np.convolve(loss, np.ones(window_size) / window_size, mode='valid')
-        plt.plot(smoothed_loss, label=method.upper())
+
+        if timesteps and len(timesteps) == len(loss):
+            x_axis = timesteps[window_size - 1:]
+            xlabel = "Timesteps"
+        else:
+            x_axis = np.arange(len(smoothed_loss))
+            xlabel = "Updates"
+
+        plt.plot(x_axis, smoothed_loss, label=method.upper())
+
     plt.title(f"Training Loss Curve - {graph_name}")
-    plt.xlabel("Episodes")
+    plt.xlabel(xlabel)
     plt.ylabel("Loss")
     plt.legend()    
     plt.grid(True)
@@ -639,12 +680,24 @@ def plot_training_curves(graph_name, training_data, results_dir):
     plt.figure(figsize=(12, 8))
     for method in rl_methods:
         variance = training_data[method]["variance"]
+        timesteps = training_data[method].get("timesteps")
+        if not variance: continue
+
         # 平滑处理以便更好地可视化
         window_size = min(10, len(variance) // 10) if len(variance) > 10 else 1
         smoothed_variance = np.convolve(variance, np.ones(window_size) / window_size, mode='valid')
-        plt.plot(smoothed_variance, label=method.upper())
+
+        if timesteps and len(timesteps) == len(variance):
+            x_axis = timesteps[window_size - 1:]
+            xlabel = "Timesteps"
+        else:
+            x_axis = np.arange(len(smoothed_variance))
+            xlabel = "Updates"
+
+        plt.plot(x_axis, smoothed_variance, label=method.upper())
+        
     plt.title(f"Partition Weight Variance Curve - {graph_name}")
-    plt.xlabel("Episodes")
+    plt.xlabel(xlabel)
     plt.ylabel("Weight Variance")
     plt.legend()    
     plt.grid(True)
@@ -661,32 +714,42 @@ def plot_avg_curves_with_std(graph_name, training_data, results_dir):
     # 对每种数据类型分别绘图
     for data_type in ["rewards", "loss", "variance"]:
         plt.figure(figsize=(12, 8))
+        xlabel = "Updates" # 默认x轴标签
 
-        # 找出最小长度以便对齐数据
-        min_length = min(len(training_data[method][data_type]) for method in training_data.keys())
+        # 找出有数据的算法
+        methods_with_data = [m for m in training_data.keys() if training_data[m].get(data_type)]
+        if not methods_with_data: continue
+        
+        for method in methods_with_data:
+            data = np.array(training_data[method][data_type])
+            if data.size == 0: continue # 跳过没有数据的算法
 
-        for method in training_data.keys():
-            data = np.array(training_data[method][data_type][:min_length])
+            timesteps = training_data[method].get("timesteps")
 
-            # 如果有多次运行结果，计算平均和标准差
-            # 这里假设我们只有单次运行，所以模拟多次运行通过移动窗口
+            # 使用移动窗口计算平均和标准差
             window_size = min(30, len(data) // 5) if len(data) > 30 else 1
             if window_size > 1:
-                # 使用移动窗口计算平均和标准差
                 means = np.convolve(data, np.ones(window_size) / window_size, mode='valid')
+                stds = np.array([np.std(data[i:i + window_size]) for i in range(len(data) - window_size + 1)])
 
-                # 计算移动标准差
-                stds = []
-                for i in range(len(data) - window_size + 1):
-                    stds.append(np.std(data[i:i + window_size]))
-                stds = np.array(stds)
-
-                x = np.arange(len(means))
-                plt.plot(x, means, label=method.upper())
-                plt.fill_between(x, means - stds, means + stds, alpha=0.3)
+                if timesteps and len(timesteps) == len(data):
+                    # 使用时间步作为x轴，需要对齐
+                    x_axis = timesteps[window_size - 1:]
+                    xlabel = "Timesteps"
+                else:
+                    x_axis = np.arange(len(means))
+                    xlabel = "Updates"
+                
+                plt.plot(x_axis, means, label=method.upper())
+                plt.fill_between(x_axis, means - stds, means + stds, alpha=0.3)
             else:
-                # 数据太少，直接绘制
-                plt.plot(data, label=method.upper())
+                if timesteps and len(timesteps) == len(data):
+                    x_axis = timesteps
+                    xlabel = "Timesteps"
+                else:
+                    x_axis = np.arange(len(data))
+                    xlabel = "Updates"
+                plt.plot(x_axis, data, label=method.upper())
 
         # 为不同数据类型设置适当的英文标题
         title_mapping = {
@@ -695,7 +758,7 @@ def plot_avg_curves_with_std(graph_name, training_data, results_dir):
             "variance": "Average Weight Variance"
         }
         plt.title(f"{title_mapping.get(data_type, data_type.capitalize())} Curve (with Std Dev) - {graph_name}")
-        plt.xlabel("Episodes")
+        plt.xlabel(xlabel)
         plt.ylabel(data_type.capitalize())
         plt.legend()        
         plt.grid(True)

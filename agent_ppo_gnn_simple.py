@@ -275,11 +275,11 @@ class SimplePPOAgentGNN:
         steps_collected = self.buffer_ptr - self.traj_start_ptr
         
         if steps_collected < self.update_frequency and self.buffer_ptr < self.memory_capacity:
-            return 0.0
+            return 0.0, False
             
         if steps_collected <= 0:
             self.traj_start_ptr = self.buffer_ptr
-            return 0.0
+            return 0.0, False
 
         # 数据准备
         indices = np.arange(self.traj_start_ptr, self.buffer_ptr)
@@ -383,7 +383,7 @@ class SimplePPOAgentGNN:
             self.buffer_ptr = 0
             self.graph_data_buffer = []
 
-        return total_loss / max(1, update_rounds)
+        return total_loss / max(1, update_rounds), True
 
     def _compute_returns_advantages_vectorized(self, rewards, dones, values):
         """计算回报和优势"""
