@@ -13,9 +13,9 @@
     "random"
   ],
   "potential_weights": {
-    "variance": 1,
+    "variance": 2,
     "edge_cut": 2,
-    "modularity": 2
+    "modularity": 1
   },
   "dqn_config": {
     "learning_rate": 0.00034139312481129536,

@@ -218,7 +218,7 @@ class GraphPartitionEnvironment(gym.Env):
         objective_potential = self._calculate_objective_potential(partition_assignment)
         
         # 分层权重：约束条件权重更高
-        total_potential = 10.0 * constraint_potential + 1.0 * objective_potential
+        total_potential = 3.0 * constraint_potential + 1.0 * objective_potential
         
         return total_potential
     
@@ -241,10 +241,37 @@ class GraphPartitionEnvironment(gym.Env):
         if max_imbalance > 0.5:  # 允许50%的不平衡
             constraint_score -= 10.0 * (max_imbalance - 0.5)
         
-        # 约束3：确保每个分区内部连通（可选）
-        # 这里暂时跳过，因为计算复杂度较高
+        # === 新增约束3：确保每个分区内部连通 ===
+        disconnected_partitions = self._count_disconnected_partitions(partition_assignment)
+        if disconnected_partitions > 0:
+            # 对每个非连通分区进行惩罚
+            # 惩罚力度设置得比空分区稍小，但仍然显著
+            constraint_score -= 50.0 * disconnected_partitions
         
         return constraint_score
+    
+    def _count_disconnected_partitions(self, partition_assignment):
+        """计算非连通分区的数量"""
+        disconnected_count = 0
+        
+        # 为每个分区构建子图并检查连通性
+        for partition_id in range(self.num_partitions):
+            # 找到属于当前分区的所有节点
+            partition_nodes = [i for i in range(self.num_nodes) 
+                             if partition_assignment[i] == partition_id]
+            
+            if len(partition_nodes) <= 1:
+                # 单节点或空分区自然是连通的（或无意义）
+                continue
+            
+            # 构建当前分区的子图
+            subgraph = self.graph.subgraph(partition_nodes)
+            
+            # 检查子图是否连通
+            if not nx.is_connected(subgraph):
+                disconnected_count += 1
+        
+        return disconnected_count
     
     def _calculate_objective_potential(self, partition_assignment):
         """计算目标优化势函数：权重方差、边切割、模块度"""
