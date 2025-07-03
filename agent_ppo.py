@@ -166,12 +166,12 @@ class PPOAgent:
         # 优化点10: 根据更新频率决定是否执行更新
         # Check if enough steps collected OR if buffer is full
         if steps_collected < self.update_frequency and self.buffer_ptr < self.memory_capacity: 
-            return 0.0
+            return None
             
         # Ensure there are steps to process
         if steps_collected <= 0:
              self.traj_start_ptr = self.buffer_ptr # Reset trajectory start if no steps
-             return 0.0
+             return None
 
         # --- Data Preparation --- 
         # Slice the relevant part of the buffer

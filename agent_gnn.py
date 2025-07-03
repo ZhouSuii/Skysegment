@@ -264,26 +264,26 @@ class GNNDQNAgent:
         # Shape: [batch_size]
         selected_q_values = current_q_values_all[global_node_indices, batch_partition_ids]
         
-        # ========= 优化: 向量化计算目标Q值 =========
+        # ========= 核心修改: 实现Double DQN逻辑以修复最大化偏差 =========
         with torch.no_grad():
-            # 计算下一状态的Q值
-            # Shape: [batch_size * num_nodes, num_partitions]
-            next_q_values_all = self.target_model(batch_next_x, batch_edge_index)
-            
-            # 找出每个节点的最大Q值
-            # Shape: [batch_size * num_nodes]
-            max_next_q_per_node = next_q_values_all.max(dim=1)[0]
-            
-            # 重塑以便按图聚合
-            # Shape: [batch_size, num_nodes]
-            max_next_q_reshaped = max_next_q_per_node.view(self.batch_size, self.num_nodes)
-            
-            # 找出每个图的最大Q值 (across all nodes in that graph)
-            # Shape: [batch_size]
-            max_q_values = max_next_q_reshaped.max(dim=1)[0]
-            
-            # 计算目标Q值
-            target_q_values = batch_rewards + (1 - batch_dones) * self.gamma * max_q_values
+            # 1. 动作选择：使用在线网络(self.model)为下一状态选择最佳动作
+            #    这能反映出当前策略认为的最佳选择
+            next_q_from_online_model = self.model(batch_next_x, batch_edge_index)
+            #    将Q值展平，为每个图找到最佳动作的索引
+            best_next_actions = next_q_from_online_model.view(self.batch_size, -1).argmax(dim=1)
+
+            # 2. 价值评估：使用目标网络(self.target_model)来评估被选中动作的价值
+            #    这提供了一个更稳定的价值估计，避免了自我膨胀
+            next_q_from_target_model = self.target_model(batch_next_x, batch_edge_index)
+            next_q_from_target_model_flat = next_q_from_target_model.view(self.batch_size, -1)
+
+            #    使用在线网络选出的 best_next_actions 来从目标网络中提取Q值
+            #    .gather() 是实现这一目标的高效方法
+            q_value_of_best_action = next_q_from_target_model_flat.gather(1, best_next_actions.unsqueeze(1)).squeeze(1)
+
+            # 3. 计算最终的目标Q值
+            #    如果一个状态是终止状态 (done=1)，则其未来价值为0
+            target_q_values = batch_rewards + (1 - batch_dones) * self.gamma * q_value_of_best_action
         
         # 计算损失
         loss = F.mse_loss(selected_q_values, target_q_values)
