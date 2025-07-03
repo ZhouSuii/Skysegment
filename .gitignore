@@ -13,7 +13,6 @@
 *.db
 /.github
 *.zip
-/2024-11-11
 /.cursor
 
 # Potentially locally-copied BADA installation
