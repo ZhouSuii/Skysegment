@@ -8,6 +8,7 @@ import random
 from torch_geometric.nn import GCNConv, global_max_pool
 from torch_geometric.data import Data, Batch
 import networkx as nx
+from torch.distributions import Categorical
 
 # 增强的GNN-DQN网络模型 - 添加了现代技术
 class GNNDQN(nn.Module):
@@ -186,33 +187,23 @@ class GNNDQNAgent:
         
         return batch_features
 
-    def act(self, state):
-        """根据当前状态选择动作"""
-        # 探索：随机选择动作
-        if np.random.rand() <= self.epsilon:
-            node_id = random.randrange(self.num_nodes)
-            target_partition = random.randrange(self.num_partitions)
-            action = node_id * self.num_partitions + target_partition
-            return action
+    def act(self, graph_data):
+        # === 修复：正确解构图数据字典 ===
+        state_tensor = graph_data['node_features'].to(self.device)
+        edge_index = graph_data['edge_index'].to(self.device)
         
-        # 利用：使用模型预测最佳动作
-        # 1. Convert single state (NumPy) to feature tensor (GPU)
-        partition_assignment = np.argmax(state[:, :self.num_partitions], axis=1)
-        x_np = np.zeros((self.num_nodes, self.node_features), dtype=np.float32)
-        x_np[np.arange(self.num_nodes), partition_assignment] = 1.0
-        x_np[:, self.num_partitions:] = self.fixed_features_np
-        x_tensor = torch.tensor(x_np, dtype=torch.float32, device=self.device)
-        
-        self.model.eval()  # 设置为评估模式
+        self.model.eval()
         with torch.no_grad():
-            # edge_index is already on device
-            q_values = self.model(x_tensor, self.edge_index) # Shape: [num_nodes, num_partitions]
-            
-            # 展平为一维数组以找出最大Q值对应的动作
-            q_values_flat = q_values.reshape(-1) # Shape: [num_nodes * num_partitions]
-            action = torch.argmax(q_values_flat).item()
+            # 将特征和边索引都传给模型
+            action_values = self.model(state_tensor, edge_index)
+        self.model.train()
+
+        # Epsilon-greedy action selection
+        if random.random() < self.epsilon:
+            action = random.randint(0, self.action_size - 1)
+        else:
+            action = action_values.argmax().item()
         
-        self.model.train()  # 恢复训练模式
         return action
 
     def replay(self):

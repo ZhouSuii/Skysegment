@@ -14,6 +14,7 @@
 /.github
 *.zip
 /.cursor
+/2024-11-11
 
 # Potentially locally-copied BADA installation
 /bluesky/resources/performance/BADA/*

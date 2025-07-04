@@ -183,11 +183,19 @@ class DQNAgent:
         current_q_values = self.model(self.cuda_batches['state'])
         current_q_values_selected = current_q_values.gather(1, self.cuda_batches['action'].unsqueeze(1)).squeeze(1)
         
-        # 批量计算目标Q值
+        # 批量计算目标Q值 (实现Double DQN)
         with torch.no_grad():
-            next_q_values = self.target_model(self.cuda_batches['next_state'])
-            max_next_q_values = next_q_values.max(1)[0]
-            expected_q_values = self.cuda_batches['reward'] + (1 - self.cuda_batches['done']) * self.gamma * max_next_q_values
+            # 1. 使用在线网络(self.model)为下一状态选择最佳动作
+            next_q_values_online = self.model(self.cuda_batches['next_state'])
+            best_next_actions = next_q_values_online.argmax(1)
+
+            # 2. 使用目标网络(self.target_model)评估被选中动作的价值
+            next_q_values_target = self.target_model(self.cuda_batches['next_state'])
+            # 使用 .gather() 从目标网络中提取Q值
+            q_value_of_best_action = next_q_values_target.gather(1, best_next_actions.unsqueeze(1)).squeeze(1)
+
+            # 3. 计算最终的目标Q值
+            expected_q_values = self.cuda_batches['reward'] + (1 - self.cuda_batches['done']) * self.gamma * q_value_of_best_action
         
         # 计算损失并优化
         loss = nn.MSELoss()(current_q_values_selected, expected_q_values)

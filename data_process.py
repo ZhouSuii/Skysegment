@@ -12,19 +12,21 @@ from sklearn.cluster import KMeans # 导入 K-Means 聚类
 
 
 # --- 配置参数 ---
-CSV_FILE_PATH = '/mnt/d/All/Python/Skysegment/2024-11-11/2024-11-11-CTU.csv'
-START_TIME_STR = '2024-11-11 19:00:00'
-END_TIME_STR = '2024-11-11 20:00:00'
+# 使用我们之前处理好的 Parquet 文件
+PARQUET_FILE_PATH = 'processed_data/all_flights_2024-11-11.parquet'
+# 我们将动态决定节点数量，但保留这个变量用于后续步骤
+NUM_GRAPH_NODES = 200 # 根据用户的选择，设置为200
 
-# 定义分析区域 (围绕 CTU: ~30.57 N, 103.94 E) - 保持与原图示例范围接近
-LAT_MIN = 28.5
-LAT_MAX = 32.5
-LON_MIN = 101.0
-LON_MAX = 108.0
-# RESOLUTION = 0.01 # 网格分辨率 (度) - 不再用于定义节点，但可用于辅助可视化或理解区域
+# --- 新增配置 ---
+# 是否运行肘部法则来寻找最佳节点数
+# 设置为 True 来运行分析，设置为 False 并填入 NUM_GRAPH_NODES 来生成图
+RUN_ELBOW_METHOD_ANALYSIS = False # 关闭分析模式，进入图生成阶段
+ELBOW_K_RANGE = range(20, 501, 20) # 扩大并细化k值范围，步长为10
+ELBOW_PLOT_OUTPUT_FILE = 'elbow_method_analysis2.png'
+
 
 # 图节点生成参数
-NUM_GRAPH_NODES = 30 # 生成的图节点数量 (对应 Original CD Points 的数量)
+# NUM_GRAPH_NODES = 30 # 被上面的占位符取代
 
 # 权重计算系数 (根据你文本公式中的 alpha 参数和 delta W 的含义)
 # w_i = W_i,0 + alpha1 * DeltaW_path + alpha2 * DeltaW_turn + alpha3 * DeltaW_hspeed + alpha4 * DeltaW_vspeed
@@ -44,13 +46,13 @@ TURN_THRESHOLD = 15 # 转弯阈值 (度)
 # 速度变化阈值 - 根据实际数据分布调整，这里使用概念值
 HSPEED_CHANGE_THRESHOLD = 10 # 水平速度变化阈值 (例如，节)
 VSPEED_CHANGE_THRESHOLD = 100 # 垂直速度变化阈值 (例如，ft/min)
-# 距离阈值 - 轨迹点在多远范围内算作“经过”节点 i
-# 这里的单位是度，假设经纬度差1度约111公里，需要根据实际情况调整
-PROXIMITY_THRESHOLD_DEG = 0.1 # 距离阈值 (度)
+# 距离阈值 - 轨迹点在多远范围内算作"经过"节点 i
+# 这里的单位是度，对于更广阔的区域，这个值可能需要小心调整
+PROXIMITY_THRESHOLD_DEG = 0.05 # 距离阈值 (度)，比之前稍小以适应更大范围
 
 # 输出文件名
-GRAPH_OUTPUT_FILE = 'ctu_airspace_graph_1900_2000_kmeans.graphml' # 修改文件名以区分方法
-PLOT_OUTPUT_FILE = 'ctu_tracks_nodes_weights_1900_2000_kmeans.png' # 修改文件名
+GRAPH_OUTPUT_FILE = 'airspace_graph_full.graphml' # 修改文件名以反映新数据源
+PLOT_OUTPUT_FILE = 'airspace_graph_full_visualization.png' # 修改文件名
 
 # --- 辅助函数 ---
 def calculate_heading_change(h1, h2):
@@ -74,44 +76,86 @@ def calculate_vspeed(alt1, alt2, t1, t2):
     return delta_alt / delta_t # 单位: ft/s
 
 
+# --- 新增辅助函数: 肘部法则分析 ---
+def find_optimal_nodes_elbow(coords, k_range, output_plot_file):
+    """
+    使用肘部法则来寻找K-Means的最佳k值 (节点数)。
+    
+    Args:
+        coords (np.array): 用于聚类的坐标数据 (N, 2)。
+        k_range (range): 要测试的k值的范围。
+        output_plot_file (str): 肘部法则图的输出文件名。
+    """
+    print("\n--- Starting Elbow Method analysis to find the optimal number of nodes ---")
+    inertias = []
+    
+    # --- 修改: 移除抽样，使用全部数据点 ---
+    # if len(coords) > 200000: # 如果轨迹点超过20万
+    #     print(f"数据量过大 ({len(coords)}), 随机抽取200,000个点进行肘部法则分析...")
+    #     sample_indices = np.random.choice(coords.shape[0], 200000, replace=False)
+    #     coords_sample = coords[sample_indices]
+    # else:
+    #     coords_sample = coords
+    print(f"警告: 正在对全部 {len(coords)} 个数据点进行分析，这可能会非常耗时。")
+    coords_sample = coords
+
+    for k in k_range:
+        print(f"Testing k={k}...")
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
+        kmeans.fit(coords_sample)
+        inertias.append(kmeans.inertia_)
+        
+    plt.figure(figsize=(12, 7))
+    plt.plot(k_range, inertias, marker='o', linestyle='-')
+    plt.title('Elbow Method for Optimal Number of Nodes')
+    plt.xlabel('Number of Nodes (k)')
+    plt.ylabel('Inertia (Within-cluster sum of squares)')
+    plt.grid(True)
+    plt.xticks(k_range)
+    plt.savefig(output_plot_file)
+    plt.close() # 关闭图像，防止在脚本末尾意外显示
+    print(f"--- 肘部法则分析完成，图表已保存至: {output_plot_file} ---")
+
+
 # --- 主逻辑 ---
-print("开始处理...")
+print("Processing started...")
 start_process_time = time.time()
 
 # 1. 加载数据
 try:
-    print(f"正在加载文件: {CSV_FILE_PATH}")
-    # 明确指定可能包含混合类型或需要特定处理的列
-    dtype_spec = {
-        'aircraft_code': str, 'Airline': str, 'track_squawk': str,
-        'track_latitude': float, 'track_longitude': float,
-        'track_altitude': float, 'track_speed': float, 'track_heading': float
-        # 添加其他你关心的列并指定类型
-    }
-    # 使用 on_bad_lines='skip' 处理格式错误行
-    df = pd.read_csv(CSV_FILE_PATH, dtype=dtype_spec, low_memory=False, on_bad_lines='skip')
-
+    print(f"正在加载 Parquet 文件: {PARQUET_FILE_PATH}")
+    df = pd.read_parquet(PARQUET_FILE_PATH)
     print(f"原始数据行数: {len(df)}")
 
     # 转换时间戳列，强制错误转为 NaT
-    print("转换时间戳...")
-    # 假定时间戳格式为 'YYYY.MM.DD, HH:MM:SS'
-    df['track_timestamp'] = pd.to_datetime(df['track_timestamp'], format='%Y.%m.%d, %H:%M:%S', errors='coerce')
+    # Parquet 通常能更好地保留类型，但以防万一
+    if df['track_timestamp'].dtype == 'object':
+        print("转换时间戳...")
+        df['track_timestamp'] = pd.to_datetime(df['track_timestamp'], errors='coerce')
 
-    # 定义需要检查的关键列，确保它们不是 NaT 或 NaN
+    # 统一航班标识：我们选择 'identification_callsign' 作为唯一标识符
+    # 为避免冲突，直接丢弃 'identification_id'
+    if 'identification_id' in df.columns:
+        df.drop(columns=['identification_id'], inplace=True)
+
+    # 定义需要检查的关键列，使用原始的列名
     required_cols = ['track_timestamp', 'identification_callsign', 'track_latitude', 'track_longitude',
                      'track_altitude', 'track_speed', 'track_heading']
-
+    
     # 删除任何关键列为 NaT 或 NaN 的行
     print("清理无效数据...")
     initial_rows = len(df)
     df.dropna(subset=required_cols, inplace=True)
     print(f"因关键数据无效移除 {initial_rows - len(df)} 行")
 
+    # 为了与脚本其余部分兼容，在清理之后再将 'identification_id' 重命名
+    # if 'identification_id' in df.columns:
+    #     df.rename(columns={'identification_id': 'identification_callsign'}, inplace=True)
+
     print(f"加载并清理后剩余有效数据点: {len(df)}")
 
 except FileNotFoundError:
-    print(f"错误：文件未找到 {CSV_FILE_PATH}")
+    print(f"错误：文件未找到 {PARQUET_FILE_PATH}")
     exit()
 except Exception as e:
     print(f"读取或处理CSV时发生错误: {e}")
@@ -119,24 +163,8 @@ except Exception as e:
     exit()
 
 # 2. 按时间筛选和地理区域筛选
-print(f"按时间筛选 ({START_TIME_STR} to {END_TIME_STR})...")
-start_time = pd.Timestamp(START_TIME_STR)
-end_time = pd.Timestamp(END_TIME_STR)
-df_time_filtered = df[(df['track_timestamp'] >= start_time) & (df['track_timestamp'] <= end_time)].copy()
-
-if df_time_filtered.empty:
-    print(f"在指定时间段内未找到数据。")
-    exit()
-
-print(f"时间筛选后剩余 {len(df_time_filtered)} 个数据点。")
-
-print(f"按地理区域筛选 (Lat: {LAT_MIN}-{LAT_MAX}, Lon: {LON_MIN}-{LON_MAX})...")
-df_filtered = df_time_filtered[
-    (df_time_filtered['track_latitude'] >= LAT_MIN) &
-    (df_time_filtered['track_latitude'] <= LAT_MAX) &
-    (df_time_filtered['track_longitude'] >= LON_MIN) &
-    (df_time_filtered['track_longitude'] <= LON_MAX)
-].copy()
+print("正在处理整个数据集，已跳过时间和地理区域筛选。")
+df_filtered = df.copy()
 
 
 if df_filtered.empty:
@@ -145,10 +173,21 @@ if df_filtered.empty:
 
 print(f"筛选得到 {len(df_filtered)} 个有效轨迹点。")
 
+
+# --- 新步骤: 运行肘部法则分析 (如果启用) ---
+filtered_track_coords = df_filtered[['track_longitude', 'track_latitude']].values
+
+if RUN_ELBOW_METHOD_ANALYSIS:
+    find_optimal_nodes_elbow(filtered_track_coords, ELBOW_K_RANGE, ELBOW_PLOT_OUTPUT_FILE)
+    print("\n肘部法则分析已完成。")
+    print(f"请检查生成的图片 '{ELBOW_PLOT_OUTPUT_FILE}' 来确定一个理想的节点数量 'k'。")
+    print("找到 'k' 后, 请修改脚本顶部的 'NUM_GRAPH_NODES' 为该值, 并将 'RUN_ELBOW_METHOD_ANALYSIS' 设置为 False, 然后重新运行脚本来生成最终的空域图。")
+    exit() # 分析完成后退出，等待用户操作
+
+
 # 3. 从过滤后的轨迹点生成图节点 (Original CD Points)
 print(f"\n开始生成 {NUM_GRAPH_NODES} 个图节点 (Original CD Points)...")
 # 提取所有过滤后的轨迹点的经纬度
-filtered_track_coords = df_filtered[['track_longitude', 'track_latitude']].values
 
 if len(filtered_track_coords) < NUM_GRAPH_NODES:
     print(f"警告: 过滤后的轨迹点数量 ({len(filtered_track_coords)}) 少于所需的节点数量 ({NUM_GRAPH_NODES})。")
@@ -264,7 +303,7 @@ for row_values in df_calc[['track_longitude', 'track_latitude', 'is_turn', 'delt
 
         processed_points_for_weight += 1
 
-print(f"将 {processed_points_for_weight} 个轨迹点贡献累加到最近的节点。")
+print(f"Aggregated contributions from {processed_points_for_weight} trajectory points to their nearest nodes.")
 
 # 计算最终节点权重 W_i
 # W_i = W_i,0 + A1*Count + A2*Turn_Sum + A3*HSpeed_Sum + A4*VSpeed_Sum
@@ -299,7 +338,7 @@ for i in range(num_graph_nodes_actual):
      # graph_node_coords 存储的是 (lon, lat)
     G.add_node(i, weight=node_weights[i], lon=graph_node_coords[i, 0], lat=graph_node_coords[i, 1])
 
-print(f"添加了 {G.number_of_nodes()} 个节点到图中。")
+print(f"Added {G.number_of_nodes()} nodes to the graph.")
 
 # 添加边 (使用 Delaunay 三角剖分连接相邻节点)
 if num_graph_nodes_actual >= 3:
@@ -351,15 +390,16 @@ plt.figure(figsize=(10, 8))
 ax = plt.gca()
 
 # a. 绘制分析区域边界 (矩形)
-boundary_rect = patches.Rectangle((LON_MIN, LAT_MIN), LON_MAX - LON_MIN, LAT_MAX - LAT_MIN,
-                                 linewidth=1, edgecolor='black', facecolor='none', linestyle='-', label='分析区域边界')
-ax.add_patch(boundary_rect)
+# 由于我们现在是全国范围，绘制一个固定的边界框意义不大
+# boundary_rect = patches.Rectangle((LON_MIN, LAT_MIN), LON_MAX - LON_MIN, LAT_MAX - LAT_MIN,
+#                                  linewidth=1, edgecolor='black', facecolor='none', linestyle='-', label='分析区域边界')
+# ax.add_patch(boundary_rect)
 
 # b. 绘制过滤后的航迹点
 # 使用原始过滤后的点 (不经过df_calc，包含所有点)
 if not df_filtered.empty:
     ax.scatter(df_filtered['track_longitude'], df_filtered['track_latitude'],
-               s=1, c='blue', alpha=0.3, label='过滤后的航迹点')
+               s=1, c='blue', alpha=0.3, label='Filtered Trajectory Points')
     print(f"绘制了 {len(df_filtered)} 个过滤后的航迹点。")
 
 # c. 绘制图节点 (Original CD Points)，并用大小反映权重
@@ -367,7 +407,7 @@ if num_graph_nodes_actual > 0:
     node_lon = graph_node_coords[:, 0]
     node_lat = graph_node_coords[:, 1]
     # 绘制节点，使用归一化后的权重决定大小
-    scatter = ax.scatter(node_lon, node_lat, s=normalized_weights, c='black', marker='o', label='Original CD Points (权重)')
+    scatter = ax.scatter(node_lon, node_lat, s=normalized_weights, c='black', marker='o', label='Graph Nodes (by weight)')
 
     # 可选：添加节点 ID 或 权重标签
     # for i in range(num_graph_nodes_actual):
@@ -388,7 +428,7 @@ if num_graph_nodes_actual > 0:
                    'gray', alpha=0.5, linewidth=0.8)
         
         # 添加边的图例（只添加一次）
-        ax.plot([], [], 'gray', alpha=0.5, linewidth=0.8, label='Delaunay连接边')
+        ax.plot([], [], 'gray', alpha=0.5, linewidth=0.8, label='Delaunay Connections')
 
     # e. 绘制节点的凸包 (红色虚线边界)
     if num_graph_nodes_actual >= 3:
@@ -397,15 +437,15 @@ if num_graph_nodes_actual > 0:
             # hull.vertices 按顺序给出凸包顶点的索引
             hull_points_indices = hull.vertices
             boundary_points = graph_node_coords[np.append(hull_points_indices, hull_points_indices[0]) , :] # 闭合环
-            ax.plot(boundary_points[:, 0], boundary_points[:, 1], 'r--', label='Original CD Points 凸包边界')
+            ax.plot(boundary_points[:, 0], boundary_points[:, 1], 'r--', label='Convex Hull of Nodes')
             print("绘制了节点凸包边界。")
         except Exception as e:
-            print(f"计算或绘制节点凸包时出错: {e}") # QHull错误可能因为点共线等
+            print(f"Error calculating or plotting convex hull: {e}") # QHull错误可能因为点共线等
 
     # 设置坐标轴、标题和图例
-    ax.set_xlabel("经度 (°E)")
-    ax.set_ylabel("纬度 (°N)")
-    ax.set_title(f"空域航迹点与图节点提取图\n({START_TIME_STR} to {END_TIME_STR})")
+    ax.set_xlabel("Longitude (°E)")
+    ax.set_ylabel("Latitude (°N)")
+    ax.set_title(f"Airspace Trajectories and Graph Node Extraction")
     # 适当设置坐标轴范围，可以稍微超出数据范围，或者使用自动调整
     # ax.set_xlim(LON_MIN, LON_MAX)
     # ax.set_ylim(LAT_MIN, LAT_MAX)

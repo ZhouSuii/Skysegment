@@ -246,7 +246,9 @@ def train_gnn_agent(graph, num_partitions, config, results_dir="results"):
         done = False
 
         for step in range(max_steps):
-            action = agent.act(state)
+            # --- 修复：为GNN Agent提供正确的图数据字典 ---
+            graph_data = env.get_state(format='graph')
+            action = agent.act(graph_data)
             next_state, reward, done, _, info = env.step(action)
 
             agent.remember(state, action, reward, next_state, done)
@@ -891,6 +893,7 @@ def main():
                         graph.add_edge(u, v)
             
             num_partitions = 3 if graph.number_of_nodes() > 15 else 2
+            # num_partitions = 2
             graph_name = f"real_airspace_{graph.number_of_nodes()}nodes"
             
             print(f"✅ 真实图加载成功: {graph.number_of_nodes()}节点, {graph.number_of_edges()}边, {num_partitions}分区")
