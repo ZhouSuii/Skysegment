@@ -5,76 +5,90 @@ import networkx as nx
 import numpy as np
 
 # 导入您项目中的核心函数
-from run_experiments import train_gnn_ppo_agent, load_graph_from_file
+# 注意：我们将直接在objective函数中复用训练逻辑，而不是直接调用train_gnn_ppo_agent
+from run_experiments import load_graph_from_file
+from new_environment import GraphPartitionEnvironment
+from agent_ppo_gnn_simple import SimplePPOAgentGNN
 from metrics import evaluate_partition
 
 def objective(trial):
     """
-    这是Optuna的目标函数，Optuna会不断调用它来寻找最优解。
-    每一次调用，Optuna都会从我们定义的搜索空间中取一组新的超参数。
+    这是Optuna的目标函数，包含了完整的训练和剪枝逻辑。
     """
     print(f"\n===== Trial #{trial.number} starting... =====")
 
     # 1. 定义超参数的搜索空间
-    #    我们告诉Optuna可以在什么范围内调整参数
     config = {
-        "episodes": 500,  # 每次试验的训练轮数可以少一点，以加快速度
+        "episodes": 500,
         "max_steps": 100,
         "gnn_ppo_config": {
-            # === 奖励函数权重 ===
             "potential_weights": {
                 "variance": trial.suggest_float("variance_weight", 0.1, 20.0, log=True),
                 "edge_cut": trial.suggest_float("edge_cut_weight", 0.1, 10.0, log=True),
                 "modularity": trial.suggest_float("modularity_weight", 0.1, 10.0, log=True),
             },
-            # === GNN-PPO Agent自身参数 ===
             "entropy_coef": trial.suggest_float("entropy_coef", 1e-3, 0.1, log=True),
             "clip_ratio": trial.suggest_float("clip_ratio", 0.1, 0.3),
-            "hidden_dim": 2048, # 保持不变
-            "num_partitions": 3 # 保持不变, 或根据图调整
+            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
+            "hidden_dim": 2048,
+            "num_partitions": num_partitions
         }
     }
 
-    # 2. 运行一次训练
-    #    我们复用您已有的训练函数
-    try:
-        partition, _, _, _, _, _ = train_gnn_ppo_agent(
-            graph,
-            num_partitions,
-            config,
-            results_dir=f"results/tuning_trials/trial_{trial.number}"
-        )
-    except Exception as e:
-        print(f"Trial #{trial.number} failed with an exception: {e}")
-        # 如果训练中途出错，告诉Optuna这次试验失败了
-        raise optuna.exceptions.TrialPruned()
+    # 2. 初始化环境和智能体 (这部分逻辑来自 train_gnn_ppo_agent)
+    gnn_ppo_config = config["gnn_ppo_config"]
+    env = GraphPartitionEnvironment(
+        graph,
+        num_partitions,
+        config["max_steps"],
+        gamma=gnn_ppo_config.get('gamma', 0.99),
+        potential_weights=gnn_ppo_config["potential_weights"]
+    )
+    node_feature_dim = num_partitions + 2
+    action_size = len(graph.nodes()) * num_partitions
+    agent = SimplePPOAgentGNN(node_feature_dim, action_size, gnn_ppo_config)
 
+    # 3. 训练循环，并在其中加入剪枝逻辑
+    for e in range(config["episodes"]):
+        graph_state, _ = env.reset(state_format='graph')
+        
+        for step in range(config["max_steps"]):
+            action = agent.act(graph_state)
+            _, reward, done, _, _ = env.step(action)
+            next_graph_state = env.get_state('graph')
+            agent.store_transition(reward, done)
+            graph_state = next_graph_state
+            if done:
+                break
+        
+        agent.update()
 
-    # 3. 评估结果并计算一个最终"分数"
-    #    这个分数是用来告诉Optuna这次调参的效果有多好
-    if partition is None:
-        print(f"Trial #{trial.number} did not produce a valid partition.")
-        # 如果没有有效的划分，也视为失败
-        raise optuna.exceptions.TrialPruned()
+        # === 剪枝核心逻辑 ===
+        # a. 在训练中途计算一个临时评估分数
+        eval_results = evaluate_partition(graph, env.partition_assignment, num_partitions, print_results=False)
+        intermediate_score = (1.0 * eval_results["weight_variance"]) + (10000 * eval_results["normalized_cut"])
+        
+        # b. 向Optuna汇报当前的分数和步数
+        trial.report(intermediate_score, e)
 
-    eval_results = evaluate_partition(graph, partition, num_partitions, print_results=False)
+        # c. 询问Optuna是否应该剪枝
+        if trial.should_prune():
+            print(f"Trial #{trial.number} pruned at episode {e} with score {intermediate_score:.2f}.")
+            raise optuna.exceptions.TrialPruned()
 
-    # === 定义我们的优化目标 ===
-    # 我们希望 方差(variance) 和 归一化切边(normalized_cut) 越小越好。
-    # 我们给它们分配一个固定的重要性权重，这里我们认为它们同等重要。
-    # 注意：这个权重和奖励函数里的权重是两个概念。
-    score = (1.0 * eval_results["weight_variance"]) + (10000 * eval_results["normalized_cut"])
+    # 4. 如果训练正常完成，返回最终分数
+    final_eval_results = evaluate_partition(graph, env.partition_assignment, num_partitions, print_results=False)
+    final_score = (1.0 * final_eval_results["weight_variance"]) + (10000 * final_eval_results["normalized_cut"])
     
-    # 增加一个惩罚项，如果分区不平衡，分数会变得很差
-    if eval_results["weight_imbalance"] > 2.0:
-        score += 1e9 # 巨大的惩罚
+    if final_eval_results["weight_imbalance"] > 2.0:
+        final_score += 1e9
 
     print(f"TRIAL #{trial.number} finished.")
     print(f"  - Params: {trial.params}")
-    print(f"  - Results: variance={eval_results['weight_variance']:.2f}, norm_cut={eval_results['normalized_cut']:.4f}")
-    print(f"  - FINAL SCORE: {score:.2f} (the lower the better)")
+    print(f"  - Results: variance={final_eval_results['weight_variance']:.2f}, norm_cut={final_eval_results['normalized_cut']:.4f}")
+    print(f"  - FINAL SCORE: {final_score:.2f} (the lower the better)")
 
-    return score
+    return final_score
 
 
 if __name__ == "__main__":
@@ -87,22 +101,30 @@ if __name__ == "__main__":
     graph = nx.relabel_nodes(graph, node_mapping)
     num_partitions = 3 if graph.number_of_nodes() > 15 else 2
 
-    # 创建一个Optuna "study" 对象，它会管理整个优化过程
-    # 我们设置一个名字，方便未来继续运行
+    # 创建一个Optuna "study" 对象
     study_name = "gnn_ppo_tuning_study"
     storage_name = f"sqlite:///{study_name}.db"
     
     print(f"🚀 Starting Optuna study: {study_name}")
     print(f"Results will be stored in: {storage_name}")
     
+    # === 新增：配置剪枝器 ===
+    # 我们使用中位数剪枝器，它会在若干步后，比较当前试验和历史试验的中位数表现
+    pruner = optuna.pruners.MedianPruner(
+        n_startup_trials=5,  # 前5次试验不做剪枝，用于收集基准数据
+        n_warmup_steps=100,   # 前50个episodes不做剪枝，让模型先热身
+        interval_steps=10    # 每10个episodes检查一次是否要剪枝
+    )
+    
     study = optuna.create_study(
         study_name=study_name,
         storage=storage_name,
-        direction="minimize", # 我们的目标是让score最小化
-        load_if_exists=True # 如果数据库文件已存在，就从上次结束的地方继续
+        direction="minimize", 
+        load_if_exists=True,
+        pruner=pruner  # <-- 将剪枝器应用到study中
     )
 
-    # 启动优化！Optuna会调用objective函数50次
+    # 启动优化
     study.optimize(objective, n_trials=50)
 
     # 实验结束，打印最佳结果
@@ -121,7 +143,7 @@ if __name__ == "__main__":
                 "edge_cut": study.best_trial.params["edge_cut_weight"],
                 "modularity": study.best_trial.params["modularity_weight"],
             },
-            "learning_rate": study.best_trial.params["learning_rate"],
+            "learning_rate": study.best_trial.params.get("learning_rate"), # .get()更安全
             "entropy_coef": study.best_trial.params["entropy_coef"],
             "clip_ratio": study.best_trial.params["clip_ratio"],
         }
