@@ -11,6 +11,31 @@ from new_environment import GraphPartitionEnvironment
 from agent_ppo_gnn_simple import SimplePPOAgentGNN
 from metrics import evaluate_partition
 
+# --- 新增辅助函数 ---
+def calculate_max_variance(graph, num_partitions):
+    """
+    计算给定图的理论最大权重方差。
+    这种情况发生在所有节点权重都集中在一个分区，而其他分区为空时。
+    这个值将作为我们后续归一化的基准。
+    """
+    if not graph.nodes or num_partitions <= 1:
+        return 1.0 # 返回1.0以避免除以零
+    
+    # 图中所有节点的权重总和
+    total_weight = sum(d.get('weight', 1.0) for _, d in graph.nodes(data=True))
+    
+    # 构造最坏情况下的分区权重列表（所有权重在一个分区）
+    worst_case_weights = [total_weight] + [0.0] * (num_partitions - 1)
+    
+    # 计算这种最坏分布下的方差
+    max_var = np.var(worst_case_weights)
+    
+    return max_var if max_var > 0 else 1.0
+
+# 全局变量，用于存储只计算一次的最大方差，以便objective函数可以访问
+# This is a practical approach for Optuna's study.optimize interface.
+max_variance = 1.0
+
 def objective(trial):
     """
     这是Optuna的目标函数，包含了完整的训练和剪枝逻辑。
@@ -66,27 +91,41 @@ def objective(trial):
         # === 剪枝核心逻辑 ===
         # a. 在训练中途计算一个临时评估分数
         eval_results = evaluate_partition(graph, env.partition_assignment, num_partitions, print_results=False)
-        intermediate_score = (1.0 * eval_results["weight_variance"]) + (10000 * eval_results["normalized_cut"])
         
+        # === 新的、更科学的评分逻辑 ===
+        # 1. 将不同量纲的指标归一化到同一个 [0, 1] 区间
+        normalized_variance = eval_results["weight_variance"] / max_variance
+        normalized_ncut = eval_results["normalized_cut"] / 2.0  # N-cut的理论上界是2.0
+
+        # 2. 使用加权和计算最终分数。alpha参数代表了我们对两个目标的偏好。
+        alpha = 0.5  # alpha=0.5 代表我们认为方差和切边同等重要
+        intermediate_score = alpha * normalized_variance + (1 - alpha) * normalized_ncut
+
         # b. 向Optuna汇报当前的分数和步数
         trial.report(intermediate_score, e)
 
         # c. 询问Optuna是否应该剪枝
         if trial.should_prune():
-            print(f"Trial #{trial.number} pruned at episode {e} with score {intermediate_score:.2f}.")
+            print(f"Trial #{trial.number} pruned at episode {e} with score {intermediate_score:.4f}.")
             raise optuna.exceptions.TrialPruned()
 
     # 4. 如果训练正常完成，返回最终分数
     final_eval_results = evaluate_partition(graph, env.partition_assignment, num_partitions, print_results=False)
-    final_score = (1.0 * final_eval_results["weight_variance"]) + (10000 * final_eval_results["normalized_cut"])
+    
+    # 重复使用相同的科学评分逻辑
+    normalized_variance = final_eval_results["weight_variance"] / max_variance
+    normalized_ncut = final_eval_results["normalized_cut"] / 2.0
+    alpha = 0.5
+    final_score = alpha * normalized_variance + (1 - alpha) * normalized_ncut
     
     if final_eval_results["weight_imbalance"] > 2.0:
-        final_score += 1e9
+        final_score += 1e9 # 保持对严重不平衡的巨大惩罚
 
     print(f"TRIAL #{trial.number} finished.")
     print(f"  - Params: {trial.params}")
-    print(f"  - Results: variance={final_eval_results['weight_variance']:.2f}, norm_cut={final_eval_results['normalized_cut']:.4f}")
-    print(f"  - FINAL SCORE: {final_score:.2f} (the lower the better)")
+    print(f"  - Raw Results: variance={final_eval_results['weight_variance']:.2f}, norm_cut={final_eval_results['normalized_cut']:.4f}")
+    print(f"  - Normalized Score Components: norm_var={normalized_variance:.4f}, norm_ncut={normalized_ncut:.4f}")
+    print(f"  - FINAL SCORE: {final_score:.4f} (the lower the better, based on normalized metrics)")
 
     return final_score
 
@@ -100,6 +139,10 @@ if __name__ == "__main__":
     node_mapping = {old_node: i for i, old_node in enumerate(graph.nodes())}
     graph = nx.relabel_nodes(graph, node_mapping)
     num_partitions = 3 if graph.number_of_nodes() > 15 else 2
+
+    # --- 新增: 在开始前，计算一次理论最大方差 ---
+    max_variance = calculate_max_variance(graph, num_partitions)
+    print(f"⚖️  Calculated theoretical max variance for normalization: {max_variance:.2f}")
 
     # 创建一个Optuna "study" 对象
     study_name = "gnn_ppo_tuning_study"
