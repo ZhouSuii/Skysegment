@@ -15,6 +15,7 @@
 *.zip
 /.cursor
 /2024-11-11
+/processed_data
 
 # Potentially locally-copied BADA installation
 /bluesky/resources/performance/BADA/*
