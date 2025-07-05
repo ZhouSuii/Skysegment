@@ -1,0 +1,12 @@
+{
+    "gnn_ppo_config": {
+        "potential_weights": {
+            "variance": 0.27337727013754787,
+            "edge_cut": 0.4497561616544195,
+            "modularity": 1.3873762128811962
+        },
+        "learning_rate": null,
+        "entropy_coef": 0.024297989138687304,
+        "clip_ratio": 0.27670898741235117
+    }
+}

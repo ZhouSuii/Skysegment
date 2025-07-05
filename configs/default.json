@@ -13,9 +13,9 @@
     "random"
   ],
   "potential_weights": {
-    "variance": 0.1,
-    "edge_cut": 5,
-    "modularity": 5
+    "variance": 0.27337727013754787,
+    "edge_cut": 0.4497561616544195,
+    "modularity": 1.3873762128811962
   },
   "dqn_config": {
     "learning_rate": 0.00034139312481129536,
@@ -49,7 +49,7 @@
     "jit_compile": false
   },
   "ppo_config": {
-    "learning_rate": 0.0002368140184225926,
+    "learning_rate": 0.00005,
     "hidden_dim": 128,
     "gamma": 0.966382464092941,
     "gae_lambda": 0.947215353198062,
@@ -65,12 +65,12 @@
     "hidden_dim": 2048,
     "num_layers": 1,
     "dropout_rate": 0.29848044095633763,
-    "gamma": 0.976182738341991,
-    "gae_lambda": 0.9247552478110529,
-    "clip_ratio": 0.18730903333641763,
+    "gamma": 0.9554850433496603,
+    "gae_lambda": 0.9214416917579799,
+    "clip_ratio": 0.27670898741235117,
     "ppo_epochs": 6,
     "batch_size": 512,
-    "entropy_coef": 0.01,
+    "entropy_coef": 0.024297989138687304,
     "value_coef": 0.43197785729901544,
     "update_frequency": 2048,
     "adam_beta1": 0.8954180387606185,

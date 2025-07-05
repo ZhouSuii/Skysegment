@@ -172,15 +172,15 @@ class SimplePPOAgentGNN:
             raise ValueError("Action size is not a multiple of num_partitions.")
 
         # === 更保守的超参数 ===
-        self.gamma = config.get('gamma', 0.99)
+        self.gamma = config.get('gamma', 0.97)
         self.gae_lambda = config.get('gae_lambda', 0.95)
         self.clip_ratio = config.get('clip_ratio', 0.2)
-        self.learning_rate = config.get('learning_rate', 0.0003)  # 适中的学习率
-        self.ppo_epochs = config.get('ppo_epochs', 4)  # 标准PPO轮数
-        self.batch_size = config.get('batch_size', 128)  # 增大批量
-        self.entropy_coef = config.get('entropy_coef', 0.01)
+        self.learning_rate = config.get('learning_rate', 0.00005)  # 适中的学习率
+        self.ppo_epochs = config.get('ppo_epochs', 6)  # 标准PPO轮数
+        self.batch_size = config.get('batch_size', 256)  # 增大批量
+        self.entropy_coef = config.get('entropy_coef', 0.005)
         self.value_coef = config.get('value_coef', 0.5)
-        self.update_frequency = config.get('update_frequency', 64)  # 更大的更新频率
+        self.update_frequency = config.get('update_frequency', 2048)  # 更大的更新频率
         
         # 缓冲区
         self.memory_capacity = config.get('memory_capacity', 20000)

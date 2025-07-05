@@ -178,12 +178,12 @@ def get_graph_for_visualization(use_real_graph=True, real_graph_path=None):
         # 尝试加载真实图
         real_graph = load_real_airspace_graph(real_graph_path)
         if real_graph is not None:
-            return real_graph, f"真实空域图({real_graph.number_of_nodes()}节点)", True
+            return real_graph, f"Real Airspace Graph({real_graph.number_of_nodes()} nodes)", True
     
     # 回退到测试图
     print("🔄 使用随机测试图")
     test_graph = create_test_graph(num_nodes=10, seed=42)
-    return test_graph, "测试图(10节点)", False
+    return test_graph, "Test Graph(10 nodes)", False
 
 def create_geographic_layout(graph):
     """
@@ -250,8 +250,8 @@ def main():
     )
     
     # 设置分区数（可根据图的大小调整）
-    #num_partitions = 3 if graph.number_of_nodes() > 15 else 2
-    num_partitions = 2
+    num_partitions = 3 if graph.number_of_nodes() > 15 else 2
+    #num_partitions = 2
     print(f"📊 使用 {num_partitions} 个分区进行划分")
     
     # 获取布局参数

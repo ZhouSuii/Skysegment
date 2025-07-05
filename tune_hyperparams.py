@@ -52,10 +52,20 @@ def objective(trial):
                 "edge_cut": trial.suggest_float("edge_cut_weight", 0.1, 10.0, log=True),
                 "modularity": trial.suggest_float("modularity_weight", 0.1, 10.0, log=True),
             },
+            # === 强烈建议新增的搜索参数 ===
+            "gamma": trial.suggest_float("gamma", 0.9, 0.999),
+            "gae_lambda": trial.suggest_float("gae_lambda", 0.9, 0.99),
+            "hidden_dim": trial.suggest_categorical("hidden_dim", [256, 512, 1024, 2048]),
             "entropy_coef": trial.suggest_float("entropy_coef", 1e-3, 0.1, log=True),
             "clip_ratio": trial.suggest_float("clip_ratio", 0.1, 0.3),
-            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
-            "hidden_dim": 2048,
+            "learning_rate": 0.00005,
+            
+            # === 新增：与 default.json 对齐的固定参数 ===
+            "ppo_epochs": 6,
+            "batch_size": 512,
+            "value_coef": 0.43197785729901544,
+            "update_frequency": 2048,
+            
             "num_partitions": num_partitions
         }
     }
@@ -168,27 +178,43 @@ if __name__ == "__main__":
     )
 
     # 启动优化
-    study.optimize(objective, n_trials=50)
+    study.optimize(objective, n_trials=50, show_progress_bar=True)
 
     # 实验结束，打印最佳结果
     print("\n\n🎉🎉🎉 TUNING COMPLETE! 🎉🎉🎉")
     print(f"Best trial: #{study.best_trial.number}")
     print(f"  - Score: {study.best_trial.value:.2f}")
     print("  - Best hyperparameters:")
-    for key, value in study.best_trial.params.items():
+    # === 修复：合并固定参数和搜索到的参数 ===
+    final_params = study.best_trial.params.copy()
+    # 手动加入在搜索中被固定的参数
+    final_params["learning_rate"] = 0.00005
+    final_params["ppo_epochs"] = 6
+    final_params["batch_size"] = 512
+    final_params["value_coef"] = 0.43197785729901544
+    final_params["update_frequency"] = 2048
+
+    for key, value in final_params.items():
         print(f"    - {key}: {value}")
 
-    # 将最佳参数保存到JSON文件
+    # === 修复：将所有相关的最佳参数保存到JSON文件 ===
     best_params_config = {
         "gnn_ppo_config": {
             "potential_weights": {
-                "variance": study.best_trial.params["variance_weight"],
-                "edge_cut": study.best_trial.params["edge_cut_weight"],
-                "modularity": study.best_trial.params["modularity_weight"],
+                "variance": final_params["variance_weight"],
+                "edge_cut": final_params["edge_cut_weight"],
+                "modularity": final_params["modularity_weight"],
             },
-            "learning_rate": study.best_trial.params.get("learning_rate"), # .get()更安全
-            "entropy_coef": study.best_trial.params["entropy_coef"],
-            "clip_ratio": study.best_trial.params["clip_ratio"],
+            "learning_rate": final_params["learning_rate"],
+            "gamma": final_params["gamma"],
+            "gae_lambda": final_params["gae_lambda"],
+            "hidden_dim": final_params["hidden_dim"],
+            "entropy_coef": final_params["entropy_coef"],
+            "clip_ratio": final_params["clip_ratio"],
+            "ppo_epochs": final_params["ppo_epochs"],
+            "batch_size": final_params["batch_size"],
+            "value_coef": final_params["value_coef"],
+            "update_frequency": final_params["update_frequency"]
         }
     }
     
